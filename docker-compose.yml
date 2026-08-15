@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  docker-pause-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: docker-pause-manager
+    restart: unless-stopped
+    ports:
+      - "5287:5287"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - CONFIG_PATH=/app/config.json
+      - LISTEN_HOST=0.0.0.0
+      - LISTEN_PORT=5287
+      - JWT_SECRET=your-secret-key-here
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      - pause-manager-net
+
+networks:
+  pause-manager-net:
+    driver: bridge

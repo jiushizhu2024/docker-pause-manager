@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Docker Pause Manager</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #f1f5f9; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .running { background: #16a34a; }
+  .paused { background: #d97706; }
+  .stopped { background: #dc2626; }
+  .unknown { background: #64748b; }
+  .modal-bg { background: rgba(15,23,42,0.4); }
+  .card { transition: all 0.2s; }
+  .card:hover { border-color: #2563eb; box-shadow: 0 4px 12px rgba(37,99,235,0.15); }
+  .port-tag { transition: all 0.15s; }
+  .port-tag:hover { background: #fecaca; border-color: #dc2626; }
+  .port-tag:hover .port-text { text-decoration: line-through; }
+  .port-tag:hover .port-protocol { text-decoration: line-through; }
+  .login-container { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .fade-in { animation: fadeIn 0.3s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body class="text-gray-900 min-h-screen">
+<!-- 登录页面 -->
+<div id="loginPage" class="login-container hidden">
+  <div class="bg-white rounded-xl p-8 w-full max-w-md mx-4 shadow-xl border border-gray-200 fade-in">
+    <div class="text-center mb-6">
+      <h1 class="text-3xl font-bold text-gray-900" data-i18n="app_title">🐳 Docker Pause Manager</h1>
+      <p class="text-gray-500 mt-1" data-i18n="login_title">登录管理面板</p>
+    </div>
+    <div id="loginForm" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" data-i18n="label_password">密码</label>
+        <input id="loginPassword" type="password" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="">
+      </div>
+      <div id="loginError" class="hidden text-red-600 text-sm text-center"></div>
+      <button onclick="doLogin()" class="w-full bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium" data-i18n="btn_login">登录</button>
+    </div>
+    <div id="firstLoginNotice" class="hidden mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 text-sm">
+      <strong data-i18n="first_login_notice">首次登录：</strong> 请设置一个管理员密码，该密码将作为您以后的登录凭据。
+    </div>
+    <!-- 语言切换 -->
+    <div class="absolute top-4 right-4 flex gap-2">
+      <button onclick="switchLang('zh-CN')" id="btn-zh-CN" class="px-3 py-1 rounded text-sm font-medium transition-colors bg-blue-600 text-white">中文</button>
+      <button onclick="switchLang('en-US')" id="btn-en-US" class="px-3 py-1 rounded text-sm font-medium transition-colors bg-gray-200 text-gray-700">EN</button>
+    </div>
+  </div>
+</div>
+
+<!-- 主应用 -->
+<div id="appPage" class="hidden">
+<header class="bg-white border-b border-gray-200 sticky top-0 z-10">
+  <div class="container mx-auto p-4 max-w-6xl flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <h1 class="text-2xl font-bold text-gray-900" data-i18n="app_title">🐳 Docker Pause Manager</h1>
+      <span class="text-xs text-gray-500 px-2 py-0.5 rounded bg-blue-50 text-blue-700">WebUI 端口: <span id="currentPort">-</span></span>
+    </div>
+    <div class="flex items-center gap-3">
+      <button onclick="openSettingsModal()" class="bg-white hover:bg-gray-100 text-gray-800 border border-gray-300 px-3 py-1.5 rounded-lg font-medium text-sm shadow-sm" data-i18n="btn_settings">⚙ 设置</button>
+      <button onclick="logout()" class="bg-white hover:bg-gray-100 text-gray-800 border border-gray-300 px-3 py-1.5 rounded-lg font-medium text-sm shadow-sm" data-i18n="btn_logout">退出</button>
+      <!-- 语言切换 -->
+      <div class="flex gap-1 ml-2">
+        <button onclick="switchLang('zh-CN')" id="btn-zh-CN-main" class="px-2 py-1 rounded text-xs font-medium transition-colors bg-blue-600 text-white">中文</button>
+        <button onclick="switchLang('en-US')" id="btn-en-US-main" class="px-2 py-1 rounded text-xs font-medium transition-colors bg-gray-200 text-gray-700">EN</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="container mx-auto p-6 max-w-6xl">
+  <div class="flex items-center justify-between mb-6">
+    <p class="text-gray-600" data-i18n="app_subtitle">空闲自动休眠 / 访问自动唤醒（支持 TCP/UDP）</p>
+    <button onclick="openAddModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm" data-i18n="btn_add">+ 添加容器</button>
+  </div>
+
+  <!-- Watchers 列表 -->
+  <div id="watcherList" class="space-y-3"></div>
+
+  <!-- 空状态 -->
+  <div id="emptyState" class="hidden text-center py-16 border-2 border-dashed border-gray-300 bg-white rounded-xl">
+    <p class="text-4xl mb-4">😴</p>
+    <p class="text-gray-700" data-i18n="empty_title">还没有配置休眠容器</p>
+    <p class="text-gray-500 text-sm mt-2" data-i18n="empty_desc">点击右上角「+ 添加容器」开始</p>
+  </div>
+</div>
+
+<!-- 添加/编辑 Modal -->
+<div id="addModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-bg">
+  <div class="bg-white rounded-xl p-6 w-full max-w-lg mx-4 shadow-xl border border-gray-200">
+    <h2 id="modalTitle" class="text-xl font-bold mb-4 text-gray-900" data-i18n="modal_add_title">添加休眠容器</h2>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" data-i18n="label_container">容器</label>
+        <select id="addContainer" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"></select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" data-i18n="label_ports">监控端口（支持多个 TCP/UDP，任一有连接即唤醒）</label>
+        <div id="portTags" class="flex flex-wrap gap-2 mb-2"></div>
+        <div class="flex gap-2">
+          <input id="addPortInput" type="number" class="flex-1 bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="">
+          <select id="addPortProto" class="bg-white border border-gray-300 rounded-lg px-2 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+            <option value="tcp">TCP</option>
+            <option value="udp">UDP</option>
+          </select>
+          <button onclick="addPortTag()" class="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm" data-i18n="btn_add_port">添加</button>
+        </div>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" data-i18n="label_idle">空闲休眠阈值（秒）</label>
+        <input id="addIdle" type="number" value="300" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+      </div>
+      <div class="flex justify-end gap-3 pt-2">
+        <button onclick="closeModal('addModal')" class="px-4 py-2 rounded-lg bg-white border border-gray-300 text-gray-700 hover:bg-gray-100" data-i18n="btn_cancel">取消</button>
+        <button onclick="saveWatcher()" class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium" data-i18n="btn_save">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 设置 Modal -->
+<div id="settingsModal" class="hidden fixed inset-0 z-50 flex items-center justify-center modal-bg">
+  <div class="bg-white rounded-xl p-6 w-full max-w-md mx-4 shadow-xl border border-gray-200">
+    <h2 class="text-xl font-bold mb-4 text-gray-900" data-i18n="btn_settings">⚙ 设置</h2>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" data-i18n="label_interval">检测间隔（秒）</label>
+        <input id="setInterval" type="number" value="2" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+        <p class="text-xs text-gray-500 mt-1" data-i18n="label_check_interval_hint">越小唤醒越快，CPU 开销略增。建议 1-5 秒。</p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1" data-i18n="label_webui_port">WebUI 监听端口</label>
+        <input id="setListenPort" type="number" value="5287" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+        <p class="text-xs text-gray-500 mt-1" data-i18n="label_webui_port_hint">修改后需重启服务生效。</p>
+      </div>
+      <div class="border-t border-gray-200 pt-4">
+        <h3 class="font-medium text-gray-900 mb-2" data-i18n="label_new_password">修改管理员密码</h3>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" data-i18n="label_new_password">新密码</label>
+          <input id="setNewPassword" type="password" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1" data-i18n="label_confirm_password">确认新密码</label>
+          <input id="setConfirmPassword" type="password" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="">
+        </div>
+        <p class="text-xs text-gray-500 mt-1" data-i18n="label_password_hint">修改后当前会话保持登录，下次登录需使用新密码。</p>
+      </div>
+      <div class="flex justify-end gap-3 pt-2">
+        <button onclick="closeModal('settingsModal')" class="px-4 py-2 rounded-lg bg-white border border-gray-300 text-gray-700 hover:bg-gray-100" data-i18n="btn_cancel">取消</button>
+        <button onclick="saveSettings()" class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium" data-i18n="btn_save">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+// ========== 认证管理 ==========
+const TOKEN_KEY = 'dpm_token';
+let authToken = localStorage.getItem(TOKEN_KEY);
+
+function getAuthHeaders() {
+  return authToken ? {'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json'} : {'Content-Type': 'application/json'};
+}
+
+async function apiRequest(path, options = {}) {
+  const headers = {...getAuthHeaders(), ...options.headers};
+  const res = await fetch(path, {...options, headers});
+  if (res.status === 401) {
+    logout();
+    throw new Error('Unauthorized');
+  }
+  return res.json();
+}
+
+const api = {
+  get: (p) => apiRequest(p),
+  post: (p, b) => apiRequest(p, {method:'POST', body:JSON.stringify(b||{})}),
+  put: (p, b) => apiRequest(p, {method:'PUT', body:JSON.stringify(b||{})}),
+  del: (p) => apiRequest(p, {method:'DELETE'}),
+};
+
+function setToken(token) {
+  authToken = token;
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+function clearToken() {
+  authToken = null;
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+async function checkAuth() {
+  try {
+    const res = await api.get('/api/auth/status');
+    if (res.has_password && !authToken) {
+      showLogin(true);
+    } else if (!res.has_password) {
+      showLogin(false);
+    } else {
+      showApp();
+      loadSettings();
+      loadWatchers();
+    }
+  } catch (e) {
+    showLogin(true);
+  }
+}
+
+function showLogin(hasPassword) {
+  document.getElementById('loginPage').classList.remove('hidden');
+  document.getElementById('appPage').classList.add('hidden');
+  document.getElementById('firstLoginNotice').classList.toggle('hidden', hasPassword);
+  document.getElementById('loginForm').classList.remove('hidden');
+  document.getElementById('loginError').classList.add('hidden');
+  document.getElementById('loginPassword').value = '';
+  document.getElementById('loginPassword').focus();
+}
+
+function showApp() {
+  document.getElementById('loginPage').classList.add('hidden');
+  document.getElementById('appPage').classList.remove('hidden');
+}
+
+async function doLogin() {
+  const password = document.getElementById('loginPassword').value;
+  if (!password) { alert(t('select_container')); return; }
+  try {
+    const res = await api.post('/api/login', {password});
+    if (res.ok) {
+      setToken(res.token);
+      showApp();
+      loadSettings();
+      loadWatchers();
+    } else {
+      document.getElementById('loginError').textContent = res.error === 'Invalid password' ? t('login_error_invalid') : (res.error || t('login_error_network'));
+      document.getElementById('loginError').classList.remove('hidden');
+    }
+  } catch (e) {
+    document.getElementById('loginError').textContent = t('login_error_network');
+    document.getElementById('loginError').classList.remove('hidden');
+  }
+}
+
+function logout() {
+  if (authToken) {
+    api.post('/api/logout').catch(()=>{}).finally(()=>{
+      clearToken();
+      showLogin(true);
+    });
+  }
+}
+
+// ========== i18n ==========
+let currentLang = 'zh-CN';
+let translations = {};
+
+async function loadTranslations(lang) {
+  try {
+    const res = await fetch(`/api/i18n/${lang}`);
+    translations = await res.json();
+    applyTranslations();
+  } catch (e) {
+    console.error('Failed to load translations:', e);
+  }
+}
+
+function t(key) {
+  return translations[key] || key;
+}
+
+function applyTranslations() {
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    if (translations[key]) {
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        el.placeholder = translations[key];
+      } else {
+        el.textContent = translations[key];
+      }
+    }
+  });
+  document.title = translations['app_title'] || 'Docker Pause Manager';
+}
+
+async function switchLang(lang) {
+  if (lang === currentLang) return;
+  currentLang = lang;
+  
+  // Update button styles
+  document.querySelectorAll('[id^="btn-"]').forEach(btn => {
+    if (btn.id.startsWith('btn-') && btn.id.endsWith('-main') || btn.id === 'btn-zh-CN' || btn.id === 'btn-en-US') {
+      btn.classList.remove('bg-blue-600', 'text-white');
+      btn.classList.add('bg-gray-200', 'text-gray-700');
+    }
+  });
+  const activeBtn = document.getElementById(`btn-${lang}`);
+  const activeBtnMain = document.getElementById(`btn-${lang}-main`);
+  if (activeBtn) {
+    activeBtn.classList.remove('bg-gray-200', 'text-gray-700');
+    activeBtn.classList.add('bg-blue-600', 'text-white');
+  }
+  if (activeBtnMain) {
+    activeBtnMain.classList.remove('bg-gray-200', 'text-gray-700');
+    activeBtnMain.classList.add('bg-blue-600', 'text-white');
+  }
+  
+  await loadTranslations(lang);
+  loadWatchers();
+}
+
+// ========== 业务逻辑 ==========
+let containersCache = [];
+let editingName = null;
+let portList = [];
+
+function esc(s){ return String(s||'').replace(/[&<>"']/g, c=>({'&':'&','<':'<','>':'>','"':'"',"'":'''}[c])); }
+
+function fmtTime(ts){
+  if(!ts) return '-';
+  const d = new Date(ts*1000);
+  return d.toLocaleString('zh-CN', {hour12:false});
+}
+function fmtIdle(s){
+  if(!s) return '-';
+  if(s < 60) return s+'s';
+  const m = Math.floor(s/60);
+  if(m < 60) return m+'min';
+  const h = Math.floor(m/60);
+  return h+'h'+(m%60)+'min';
+}
+
+function statusDot(status){
+  const map = {running:'running', paused:'paused', exited:'stopped', 'not-found':'unknown', unknown:'unknown'};
+  return `<span class="status-dot ${map[status]||'unknown'}"></span>`;
+}
+function statusText(w){
+  if(!w.enabled) return `<span class="text-gray-500">${t('status_disabled')}</span>`;
+  if(w.docker_status === 'exited') return `<span class="text-gray-500">${t('status_exited')}</span>`;
+  if(w.docker_status === 'paused') return `<span class="text-amber-600 font-medium">${t('status_paused')}</span>`;
+  if(w.docker_status === 'running') return `<span class="text-green-700 font-medium">${t('status_running')}</span>`;
+  return `<span class="text-gray-400">${t('status_unknown')}</span>`;
+}
+
+function renderPortTags(){
+  const container = document.getElementById('portTags');
+  const protoColors = {tcp: 'bg-blue-50 border-blue-300 text-blue-800', udp: 'bg-purple-50 border-purple-300 text-purple-800'};
+  const protoLabels = {tcp: 'TCP', udp: 'UDP'};
+  container.innerHTML = portList.map((p, i) => `
+    <span class="port-tag inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-sm cursor-pointer ${protoColors[p.protocol]||protoColors.tcp}" onclick="removePortTag(${i})">
+      <span class="port-text">🔌 ${esc(p.port)}</span>
+      <span class="port-protocol font-medium text-xs">${protoLabels[p.protocol]||'TCP'}</span>
+      <span class="text-gray-400 hover:text-red-600">✕</span>
+    </span>
+  `).join('');
+}
+
+function addPortTag(){
+  const input = document.getElementById('addPortInput');
+  const proto = document.getElementById('addPortProto').value;
+  const val = input.value.trim();
+  if(!val) return;
+  const port = parseInt(val);
+  if(isNaN(port) || port < 1 || port > 65535){ alert(t('add_port_required')); return; }
+  if(portList.some(p => p.port === port && p.protocol === proto)){ alert(t('add_port_required')); input.value=''; return; }
+  portList.push({port: port, protocol: proto});
+  input.value = '';
+  renderPortTags();
+}
+
+function removePortTag(i){
+  portList.splice(i, 1);
+  renderPortTags();
+}
+
+async function loadWatchers(){
+  try {
+    const ws = await api.get('/api/watchers');
+    const list = document.getElementById('watcherList');
+    const empty = document.getElementById('emptyState');
+    if(!ws.length){ empty.classList.remove('hidden'); list.innerHTML=''; return; }
+    empty.classList.add('hidden');
+    list.innerHTML = ws.map(w => {
+      const ports = (w.host_ports || []);
+      const protoLabels = {tcp: 'TCP', udp: 'UDP'};
+      const protoColors = {tcp: 'bg-blue-100 text-blue-800', udp: 'bg-purple-100 text-purple-800'};
+      const portsHtml = ports.map(p => {
+        const proto = p.protocol || 'tcp';
+        const label = p.port + '/' + (protoLabels[proto]||'TCP');
+        return `<span class="inline-block px-2 py-0.5 rounded ${protoColors[proto]||protoColors.tcp} text-xs font-medium">🔌 ${esc(label)}</span>`;
+      }).join(' ');
+      return `
+      <div class="card border border-gray-300 bg-white rounded-xl p-4 flex items-center justify-between shadow-sm">
+        <div class="flex items-center gap-4">
+          ${statusDot(w.docker_status)}
+          <div>
+            <div class="font-semibold text-lg text-gray-900">${esc(w.container)} 
+              <span class="text-xs text-gray-500">${esc(w.image||'')}</span>
+            </div>
+            <div class="text-sm text-gray-700 mt-1 flex items-center gap-3 flex-wrap">
+              <span class="flex items-center gap-1">${ports.length ? portsHtml : `<span class="text-gray-400 text-xs">${t('no_ports')}</span>`}</span>
+              <span>${t('idle_threshold')}: <b>${fmtIdle(w.idle_seconds)}</b></span>
+              <span>状态: ${statusText(w)}</span>
+            </div>
+            <div class="text-xs text-gray-600 mt-1">
+              ${w.watcher_alive ? t('watcher_alive') : t('watcher_dead')} 
+              ${w.paused_at ? ' | '+t('paused_at')+' '+fmtTime(w.paused_at) : ''}
+              ${w.last_action ? ' | '+t('last_action')+': '+esc(w.last_action) : ''}
+            </div>
+          </div>
+        </div>
+        <div class="flex gap-2">
+          ${w.docker_status==='paused' ? 
+            `<button onclick="manualAction('${w.container}','unpause')" class="px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm">${t('btn_unpause')}</button>` :
+            (w.docker_status==='exited' ? 
+            `<button onclick="manualAction('${w.container}','start')" class="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm">${t('btn_start')}</button>` :
+            (w.docker_status==='running' ? `<button onclick="manualAction('${w.container}','pause')" class="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-sm">${t('btn_pause')}</button>` : ''))}
+          <button onclick="openEditModal('${w.container}')" class="px-3 py-1.5 rounded-lg bg-white border border-gray-300 text-gray-700 hover:bg-gray-100 text-sm">${t('btn_edit')}</button>
+          <button onclick="deleteWatcher('${w.container}')" class="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm">${t('btn_delete')}</button>
+        </div>
+      </div>
+    `}).join('');
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function loadContainers(){
+  try {
+    containersCache = await api.get('/api/containers');
+    const sel = document.getElementById('addContainer');
+    sel.innerHTML = containersCache.map(c => `
+      <option value="${esc(c.name)}">${esc(c.name)} [${esc(c.status)}]</option>
+    `).join('');
+    sel.onchange = () => {
+      const c = containersCache.find(x=>x.name===sel.value);
+      if(c){
+        portList = [];
+        for(const [key, value] of Object.entries(c.ports||{})){
+          const parts = key.split('/');
+          const port = parseInt(parts[0]);
+          const proto = parts[1] || 'tcp';
+          if(value && !portList.some(p => p.port === port && p.protocol === proto)){
+            portList.push({port: port, protocol: proto});
+          }
+        }
+        renderPortTags();
+      }
+    };
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function openAddModal(){
+  editingName = null;
+  portList = [];
+  document.getElementById('modalTitle').textContent = t('modal_add_title');
+  document.getElementById('addContainer').disabled = false;
+  document.getElementById('addPortInput').value = '';
+  document.getElementById('addPortProto').value = 'tcp';
+  document.getElementById('addIdle').value = '300';
+  document.getElementById('portTags').innerHTML = '';
+  loadContainers();
+  document.getElementById('addModal').classList.remove('hidden');
+  document.getElementById('addPortInput').onkeydown = (e) => {
+    if(e.key === 'Enter'){ e.preventDefault(); addPortTag(); }
+  };
+}
+
+function openEditModal(name){
+  editingName = name;
+  document.getElementById('modalTitle').textContent = t('modal_edit_title') + ': '+name;
+  document.getElementById('addContainer').disabled = true;
+  api.get('/api/watchers').then(ws => {
+    const w = ws.find(x=>x.container===name);
+    if(w){
+      document.getElementById('addContainer').innerHTML = `<option value="${esc(name)}">${esc(name)}</option>`;
+      portList = (w.host_ports||[]).map(p => {
+        return {port: typeof p === 'object' ? p.port : p, protocol: p.protocol || 'tcp'};
+      });
+      renderPortTags();
+      document.getElementById('addPortInput').value = '';
+      document.getElementById('addPortProto').value = 'tcp';
+      document.getElementById('addIdle').value = w.idle_seconds;
+    }
+  });
+  document.getElementById('addPortInput').onkeydown = (e) => {
+    if(e.key === 'Enter'){ e.preventDefault(); addPortTag(); }
+  };
+  document.getElementById('addModal').classList.remove('hidden');
+}
+
+function closeModal(id){ document.getElementById(id).classList.add('hidden'); }
+
+async function saveWatcher(){
+  const name = document.getElementById('addContainer').value;
+  const idle = document.getElementById('addIdle').value;
+  if(!name){ alert(t('select_container')); return; }
+  if(!portList.length){ alert(t('add_port_required')); return; }
+  try {
+    if(editingName){
+      await api.put('/api/watchers/'+encodeURIComponent(editingName), {host_ports:portList, idle_seconds:idle});
+    } else {
+      await api.post('/api/watchers', {container:name, host_ports:portList, idle_seconds:idle});
+    }
+    closeModal('addModal');
+    loadWatchers();
+  } catch (e) {
+    alert(t('save_failed') + ': ' + e.message);
+  }
+}
+
+async function deleteWatcher(name){
+  if(!confirm(t('confirm_delete').replace('{{name}}', name))) return;
+  try {
+    await api.del('/api/watchers/'+encodeURIComponent(name));
+    loadWatchers();
+  } catch (e) {
+    alert(t('delete_failed') + ': ' + e.message);
+  }
+}
+
+async function manualAction(name, action){
+  try {
+    await api.post(`/api/watchers/${encodeURIComponent(name)}/${action}`);
+    setTimeout(loadWatchers, 500);
+  } catch (e) {
+    alert(t('operation_failed') + ': ' + e.message);
+  }
+}
+
+async function loadSettings(){
+  try {
+    const s = await api.get('/api/settings');
+    document.getElementById('setInterval').value = s.check_interval || 2;
+    document.getElementById('setListenPort').value = s.listen_port || 5287;
+    document.getElementById('currentPort').textContent = s.listen_port || 5287;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function openSettingsModal(){
+  document.getElementById('settingsModal').classList.remove('hidden');
+  loadSettings();
+  document.getElementById('setNewPassword').value = '';
+  document.getElementById('setConfirmPassword').value = '';
+}
+
+async function saveSettings(){
+  const interval = document.getElementById('setInterval').value;
+  const listenPort = document.getElementById('setListenPort').value;
+  const newPass = document.getElementById('setNewPassword').value;
+  const confirmPass = document.getElementById('setConfirmPassword').value;
+  
+  if (newPass && newPass !== confirmPass) {
+    alert(t('password_mismatch'));
+    return;
+  }
+  
+  const body = {check_interval: interval, listen_port: listenPort};
+  if (newPass) body.new_password = newPass;
+  
+  try {
+    await api.post('/api/settings', body);
+    closeModal('settingsModal');
+    loadSettings();
+    alert(t('setting_updated'));
+  } catch (e) {
+    alert(t('save_failed') + ': ' + e.message);
+  }
+}
+
+// 初始化
+checkAuth();
+setInterval(loadWatchers, 5000);
+</script>
+</body>
+</html>
