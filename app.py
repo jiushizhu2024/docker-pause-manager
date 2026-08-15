@@ -416,16 +416,21 @@ def index():
             }
             function login() {
                 const pwd = document.getElementById('password').value;
-                crypto.subtle.digest('SHA-256', new TextEncoder().encode('dpm-'+pwd)).then(h => {
-                    token = Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2,'0')).join('');
+                fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({password: pwd})
+                }).then(r => {
+                    if (!r.ok) { showToast('密码错误', 'error'); return; }
+                    return r.json();
+                }).then(data => {
+                    if (!data) return;
+                    token = data.token;
                     document.getElementById('loginForm').style.display = 'none';
                     document.getElementById('mainContent').classList.remove('hidden');
                     refreshStatus();
                 }).catch(() => {
-                    token = btoa('admin:' + pwd);
-                    document.getElementById('loginForm').style.display = 'none';
-                    document.getElementById('mainContent').classList.remove('hidden');
-                    refreshStatus();
+                    showToast('登录失败', 'error');
                 });
             }
             async function apiCall(path, method='GET', body=null) {
@@ -461,6 +466,15 @@ def index():
     </html>
     """
     return html
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    """登录接口，验证密码并返回 token"""
+    data = request.get_json()
+    if not data or data.get("password") != ADMIN_PASSWORD:
+        return jsonify({"error": "密码错误"}), 401
+    token = hashlib.sha256(f"dpm-{ADMIN_PASSWORD}".encode()).hexdigest()
+    return jsonify({"token": token, "success": True})
 
 @app.route("/api/status")
 @require_auth
