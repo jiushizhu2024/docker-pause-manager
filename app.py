@@ -411,8 +411,10 @@ def index():
         <div class="container">
             <h1>🐳 Docker Pause Manager</h1>
             <div class="login-form" id="loginForm">
-                <input type="password" id="password" placeholder="管理员密码" />
-                <button class="btn btn-primary" onclick="login()">登录</button>
+                <form onsubmit="event.preventDefault(); login();">
+                    <input type="password" id="password" placeholder="管理员密码" />
+                    <button class="btn btn-primary" type="submit">登录</button>
+                </form>
             </div>
             <div id="mainContent" class="hidden">
                 <div class="stats" id="stats"></div>
@@ -439,6 +441,7 @@ def index():
             }
             function login() {
                 const pwd = document.getElementById('password').value;
+                console.log('登录中...', pwd ? '密码已输入' : '密码为空');
                 fetch('/api/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -452,8 +455,9 @@ def index():
                     document.getElementById('loginForm').style.display = 'none';
                     document.getElementById('mainContent').classList.remove('hidden');
                     refreshStatus();
-                }).catch(() => {
-                    showToast('登录失败', 'error');
+                }).catch(e => {
+                    console.error('登录失败:', e);
+                    showToast('登录失败: ' + e.message, 'error');
                 });
             }
             async function apiCall(path, method='GET', body=null) {
