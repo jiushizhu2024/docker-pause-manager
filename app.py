@@ -7,7 +7,7 @@ Docker Pause Manager - Web UI
 """
 import json, os, time, threading, subprocess, logging, hashlib, secrets
 from functools import wraps
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, make_response
 
 # ===== Docker SDK 兼容性修复 =====
 # 使用 requests-unixsocket2 替代 docker SDK 自带适配器
@@ -361,12 +361,15 @@ def monitor_loop():
 
 @app.route("/")
 def index():
-    html = """
+    resp = make_response("""
     <!DOCTYPE html>
     <html lang="zh-CN">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
         <title>Docker Pause Manager</title>
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -491,8 +494,8 @@ def index():
         </script>
     </body>
     </html>
-    """
-    return html
+    """)
+    return resp
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
