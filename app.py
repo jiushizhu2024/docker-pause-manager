@@ -122,7 +122,7 @@ except ImportError:
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/app/config.json")
 STATE_PATH = os.environ.get("STATE_PATH", "/app/state.json")
 
-# 默认配置（嵌入镜像中）
+# 默认配置
 DEFAULT_CONFIG = {
     "admin_password": "admin123",
     "idle_timeout": 300,
@@ -130,37 +130,29 @@ DEFAULT_CONFIG = {
     "containers": {}
 }
 
-def ensure_config_file(path, default_content):
-    """确保配置文件存在且是文件（不是目录）
-    
-    当 Docker bind mount 的宿主机路径不存在时，Docker 会创建为目录，
-    导致容器内无法读取。此函数检测并修复此情况。
-    """
-    if os.path.isdir(path):
-        log.warning(f"[{path}] 是目录（Docker bind mount 创建），正在修复为文件...")
-        os.rmdir(path)
-    if not os.path.exists(path):
-        log.info(f"[{path}] 不存在，正在创建默认配置...")
-        dir_name = os.path.dirname(path)
-        if dir_name:
-            os.makedirs(dir_name, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(default_content, f, ensure_ascii=False, indent=2)
-        log.info(f"[{path}] 默认配置已创建")
-
-# 确保配置文件存在
-ensure_config_file(CONFIG_PATH, DEFAULT_CONFIG)
-ensure_config_file(STATE_PATH, {})
-
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "5287"))
-# JWT 配置（用于 JWT 认证模式，可选）
-JWT_SECRET = secrets.token_hex(32)  # 动态生成的密钥（含连字符）
+JWT_SECRET = secrets.token_hex(32)
 JWT_ALGORITHM = "HS256"
 JWT_EXP_HOURS = 24
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pause-manager")
+
+# ===== 启动时确保配置文件存在 =====
+def ensure_config_file(path, default_content):
+    """确保配置文件存在，不存在则创建默认内容"""
+    if not os.path.exists(path):
+        log.info(f"[startup] {path} 不存在，正在创建默认配置...")
+        dir_name = os.path.dirname(path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(default_content, f, ensure_ascii=False, indent=2)
+        log.info(f"[startup] {path} 默认配置已创建")
+
+ensure_config_file(CONFIG_PATH, DEFAULT_CONFIG)
+ensure_config_file(STATE_PATH, {})
 
 app = Flask(__name__, static_folder=None)
 

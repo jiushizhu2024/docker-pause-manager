@@ -6,8 +6,6 @@ services:
     ports:
       - "5287:5287"
     volumes:
-      - ./config.json:/app/config.json
-      - ./state.json:/app/state.json
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - CONFIG_PATH=/app/config.json
