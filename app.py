@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("pause-manager")
 
 app = Flask(__name__, static_folder=None)
-cli = docker.from_env()
+cli = docker.DockerClient(base_url="unix:/var/run/docker.sock")
 
 DEFAULT_CONFIG = {
     "watchers": [],

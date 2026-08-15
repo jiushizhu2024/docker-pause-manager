@@ -19,7 +19,7 @@ FROM python:3.11-alpine AS production
 # Add non-root user and add to docker group
 RUN addgroup -g 1000 -S appgroup && \
     adduser -u 1000 -S appuser -G appgroup && \
-    addgroup appuser docker
+    adduser appuser docker
 
 # Set working directory
 WORKDIR /app
