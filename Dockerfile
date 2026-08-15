@@ -16,9 +16,10 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # Stage 2: Production stage
 FROM python:3.11-alpine AS production
 
-# Add non-root user
+# Add non-root user and add to docker group
 RUN addgroup -g 1000 -S appgroup && \
-    adduser -u 1000 -S appuser -G appgroup
+    adduser -u 1000 -S appuser -G appgroup && \
+    addgroup appuser docker
 
 # Set working directory
 WORKDIR /app
