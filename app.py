@@ -295,7 +295,7 @@ def monitor_loop():
             log.error(f"监控循环异常: {e}")
         time.sleep(CHECK_INTERVAL)
 
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def index():
     resp = make_response("""
     <!DOCTYPE html>
@@ -420,8 +420,8 @@ def web_login():
     password = request.form.get("password", "")
     if password == ADMIN_PASSWORD:
         token = hashlib.sha256(f"dpm-{ADMIN_PASSWORD}".encode()).hexdigest()
-        return redirect(f"/?token={token}")
-    return redirect("/?error=1")
+        return redirect(f"/?token={token}"), 303
+    return redirect("/?error=1"), 303
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
