@@ -1,0 +1,8 @@
+{
+  "watchers": [],
+  "settings": {
+    "check_interval": 2,
+    "listen_port": 5287,
+    "admin_password_hash": ""
+  }
+}

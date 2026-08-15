@@ -33,7 +33,7 @@ ENV PATH=/home/appuser/.local/bin:$PATH
 COPY app.py .
 COPY static/ static/
 COPY i18n/ i18n/
-COPY config.json .
+COPY config.json.example config.json
 
 # Change ownership to appuser
 RUN chown -R appuser:appgroup /app
