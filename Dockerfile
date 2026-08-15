@@ -33,16 +33,18 @@ ENV PATH=/home/appuser/.local/bin:$PATH
 COPY app.py .
 COPY static/ static/
 COPY i18n/ i18n/
+
+# 如果存在 config.json 则复制，否则使用示例配置
 COPY config.json.example config.json
 
 # Change ownership to appuser
 RUN chown -R appuser:appgroup /app
 
+# Install wget for healthcheck (需要 root 权限，必须在 USER 之前)
+RUN apk add --no-cache wget
+
 # Switch to non-root user
 USER appuser
-
-# Install wget for healthcheck
-RUN apk add --no-cache wget
 
 # Expose port
 EXPOSE 5287
