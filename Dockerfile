@@ -10,12 +10,11 @@ WORKDIR /app
 
 COPY app.py /app/app.py
 
-# Pin requests to avoid urllib3 scheme compatibility issue with docker SDK 6.x
+# 使用 requests-unixsocket2 直接调 Docker API，绕过 docker SDK 的兼容问题
 RUN pip install --no-cache-dir \
     flask \
-    requests==2.31.0 \
-    urllib3==1.26.20 \
-    docker==6.1.3 \
+    requests \
+    requests-unixsocket2 \
     pyjwt
 
 EXPOSE 5287

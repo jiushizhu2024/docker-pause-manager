@@ -1,22 +1,24 @@
-version: '3.8'
-
 services:
   docker-pause-manager:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/jiushizhu2024/docker-pause-manager:latest
     container_name: docker-pause-manager
     restart: unless-stopped
     ports:
       - "5287:5287"
     volumes:
+      # 挂载 app.py 允许本地热更新（不依赖镜像重建）
+      - ./app.py:/app/app.py
+      # 配置文件
       - ./config.json:/app/config.json:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # 持久化状态（重启后恢复 pause 标记）
+      - ./state.json:/app/state.json
+      # Docker API 访问（需要 rw 权限来 pause/unpause/start）
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - CONFIG_PATH=/app/config.json
+      - STATE_PATH=/app/state.json
       - LISTEN_HOST=0.0.0.0
       - LISTEN_PORT=5287
-      - JWT_SECRET=your-secret-key-here
     cap_add:
       - NET_ADMIN
       - NET_RAW
