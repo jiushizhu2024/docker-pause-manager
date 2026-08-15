@@ -4,9 +4,8 @@ services:
     container_name: docker-pause-manager
     restart: unless-stopped
     ports:
-      - 5287:5287
+      - "5287:5287"
     volumes:
-      - ./app.py:/app/app.py
       - ./config.json:/app/config.json:ro
       - ./state.json:/app/state.json
       - /var/run/docker.sock:/var/run/docker.sock
