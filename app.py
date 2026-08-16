@@ -437,6 +437,7 @@ def save_config_api():
 
 @app.route("/api/password", methods=["POST"])
 def change_password():
+    global ADMIN_PASSWORD
     data = request.get_json(silent=True) or {}
     if data.get("current_password") != ADMIN_PASSWORD:
         return jsonify({"success": False, "error": "当前密码错误"}), 400
@@ -444,7 +445,6 @@ def change_password():
     confirm = data.get("confirm_password")
     if new != confirm:
         return jsonify({"success": False, "error": "两次密码不一致"}), 400
-    global ADMIN_PASSWORD
     ADMIN_PASSWORD = new
     save_config({"admin_password": ADMIN_PASSWORD, "global_idle_timeout": GLOBAL_IDLE,
                  "check_interval": CHECK_INTERVAL, "containers": MONITORED,
