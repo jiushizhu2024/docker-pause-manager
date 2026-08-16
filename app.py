@@ -143,26 +143,43 @@ def unpause_container(name):
 
 # ===== Connection Detection =====
 def has_new_connection(ports):
+    """检测是否有新连接（包括 SYN_RECV 等初始状态的连接）"""
     for p in ports:
         port = p.get("port", 80)
         proto = p.get("proto", "tcp")
         try:
-            r = subprocess.run(["conntrack", "-L", "-p", proto, "--state", "NEW",
-                                "-d", f":{port}"], capture_output=True, text=True, timeout=5)
-            if r.stdout.strip() and any("NEW" in l for l in r.stdout.split("\n") if l.strip()):
-                return True
+            r = subprocess.run(["conntrack", "-L", "-p", proto],
+                               capture_output=True, text=True, timeout=5)
+            for line in r.stdout.split("\n"):
+                if not line.strip() or "conntrack" in line.lower():
+                    continue
+                # 匹配 dport=<port>（目标端口）
+                if f"dport={port}" not in line:
+                    continue
+                # NEW 状态或有 NEW 标记
+                if "NEW" in line:
+                    return True
+                # SYN_RECV 状态表示新连接正在建立
+                if "SYN" in line:
+                    return True
+            return False
         except: pass
     return False
 
 def get_connection_count(ports):
+    """统计活跃连接数（ESTABLISHED 或 ASSURED）"""
     count = 0
     for p in ports:
         port = p.get("port", 80)
         proto = p.get("proto", "tcp")
         try:
-            r = subprocess.run(["conntrack", "-L", "-p", proto, "-d", f":{port}"],
+            r = subprocess.run(["conntrack", "-L", "-p", proto],
                                capture_output=True, text=True, timeout=5)
             for line in r.stdout.split("\n"):
+                if not line.strip() or "conntrack" in line.lower():
+                    continue
+                if f"dport={port}" not in line:
+                    continue
                 if "ESTABLISHED" in line or "ASSURED" in line:
                     count += 1
         except: pass
