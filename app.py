@@ -400,13 +400,20 @@ def index():
                     html += '<tr><td><strong>'+c.name+'</strong></td>'
                         + '<td><span class="status-badge status-'+c.status.replace(' ','_')+'">'+c.status+'</span></td>'
                         + '<td style="color:#64748b;font-size:13px;">'+c.idle_seconds+'s</td><td>';
-                    if (c.status === 'paused') html += '<button class="btn btn-success" onclick="unpause(\''+c.name+'\')">唤醒</button>';
-                    else if (c.status === 'running') html += '<button class="btn btn-warning" onclick="pause(\''+c.name+'\')">暂停</button>';
+                    if (c.status === 'paused') html += '<button class="btn btn-success" data-action="unpause" data-name="'+c.name+'">唤醒</button>';
+                    else if (c.status === 'running') html += '<button class="btn btn-warning" data-action="pause" data-name="'+c.name+'">暂停</button>';
                     html += '</td></tr>';
                 }
                 html += '</table>';
                 document.getElementById('containerList').innerHTML = html;
             }
+            document.getElementById('containerList').addEventListener('click', function(e) {
+                const btn = e.target.closest('button[data-action]');
+                if (!btn) return;
+                const name = btn.getAttribute('data-name');
+                if (btn.dataset.action === 'pause') pause(name);
+                else if (btn.dataset.action === 'unpause') unpause(name);
+            });
             async function pause(name) { await apiCall('/api/pause/'+name, 'POST'); refreshStatus(); }
             async function unpause(name) { await apiCall('/api/unpause/'+name, 'POST'); refreshStatus(); }
         </script>
