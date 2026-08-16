@@ -1,33 +1,6 @@
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
+*.pyc
 .venv/
-pip-wheel-metadata/
-build/
-dist/
-*.egg-info/
-
-# Docker
-.docker/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Config (contains secrets)
+.env
 config.json
-
-# Logs
-*.log
 state.json

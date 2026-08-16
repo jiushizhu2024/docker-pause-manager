@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title data-i18n="title">Docker Pause Manager</title>
+<style>
+:root {
+  --bg: #f1f5f9; --card-bg: #fff; --text: #1e293b; --text2: #64748b;
+  --border: #e2e8f0; --primary: #2563eb; --primary-hover: #1d4ed8;
+  --success: #16a34a; --warning: #d97706; --danger: #dc2626;
+  --input-bg: #fff; --input-border: #cbd5e1; --shadow: rgba(0,0,0,0.1);
+  --overlay: rgba(0,0,0,0.5);
+}
+[data-theme="dark"] {
+  --bg: #0f172a; --card-bg: #1e293b; --text: #f1f5f9; --text2: #94a3b8;
+  --border: #334155; --primary: #3b82f6; --primary-hover: #60a5fa;
+  --input-bg: #334155; --input-border: #475569; --shadow: rgba(0,0,0,0.3);
+  --overlay: rgba(0,0,0,0.7);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       background: var(--bg); color: var(--text); padding: 20px; transition: background .3s, color .3s; }
+.container { max-width: 960px; margin: 0 auto; }
+h1 { font-size: 24px; margin-bottom: 20px; color: var(--text); }
+.card { background: var(--card-bg); border-radius: 12px; padding: 20px; margin-bottom: 16px;
+        box-shadow: 0 1px 3px var(--shadow); transition: background .3s; }
+.card h2 { font-size: 18px; margin-bottom: 12px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 600; }
+.badge-running { background: #dcfce7; color: #166534; }
+.badge-paused { background: #fef3c7; color: #92400e; }
+.badge-exited { background: #fce4ec; color: #c62828; }
+.badge-not_found { background: var(--bg); color: var(--text2); }
+.btn { display: inline-block; padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer;
+       font-size: 14px; font-weight: 500; transition: background .2s; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-success { background: var(--success); color: #fff; }
+.btn-success:hover { background: #15803d; }
+.btn-warning { background: var(--warning); color: #fff; }
+.btn-warning:hover { background: #b45309; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:hover { background: #b91c1c; }
+.btn-sm { padding: 6px 12px; font-size: 13px; }
+.btn-ghost { background: transparent; color: var(--text2); border: 1px solid var(--border); }
+.btn-ghost:hover { background: var(--bg); }
+.hidden { display: none !important; }
+.login-form { max-width: 360px; margin: 40px auto; padding: 24px; background: var(--card-bg);
+              border-radius: 12px; box-shadow: 0 1px 3px var(--shadow); }
+.login-form h2 { text-align: center; margin-bottom: 20px; }
+.login-form input { width: 100%; padding: 10px 12px; border: 1px solid var(--input-border);
+                    border-radius: 8px; font-size: 14px; background: var(--input-bg);
+                    color: var(--text); margin-bottom: 12px; }
+.login-form input:focus { outline: none; border-color: var(--primary); }
+.login-form button { width: 100%; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+th { color: var(--text2); font-weight: 600; }
+.stats { display: flex; gap: 16px; margin-bottom: 16px; }
+.stat-box { flex: 1; background: var(--card-bg); padding: 16px; border-radius: 12px;
+            text-align: center; box-shadow: 0 1px 3px var(--shadow); }
+.stat-box .num { font-size: 28px; font-weight: 700; }
+.stat-box .label { font-size: 13px; color: var(--text2); }
+.toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 8px;
+         color: #fff; font-size: 14px; z-index: 999; display: none; }
+.toast-success { background: var(--success); }
+.toast-error { background: var(--danger); }
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+                 background: var(--overlay); z-index: 1000;
+                 display: flex; align-items: center; justify-content: center; }
+.modal-overlay.hidden { display: none !important; }
+.modal { background: var(--card-bg); border-radius: 12px; padding: 24px; width: 100%;
+         max-width: 480px; box-shadow: 0 10px 40px rgba(0,0,0,0.2); }
+.modal h3 { margin-bottom: 20px; }
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500; }
+.form-group input, .form-group select, .form-group textarea { width: 100%; padding: 10px 12px;
+    border: 1px solid var(--input-border); border-radius: 8px; font-size: 14px; font-family: inherit;
+    background: var(--input-bg); color: var(--text); }
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus { outline: none; border-color: var(--primary); }
+.form-group textarea { resize: vertical; font-family: monospace; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+.config-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0;
+              border-bottom: 1px solid var(--border); }
+.config-row:last-child { border-bottom: none; }
+.config-info { display: flex; flex-direction: column; gap: 4px; }
+.config-name { font-weight: 600; }
+.config-ports { font-size: 13px; color: var(--text2); font-family: monospace; }
+.config-meta { font-size: 12px; color: var(--text2); }
+.config-actions { display: flex; gap: 8px; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.settings-grid .full { grid-column: 1 / -1; }
+@media (max-width: 640px) { .settings-grid { grid-template-columns: 1fr; } }
+.header-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.header-bar .title { font-size: 24px; font-weight: 700; }
+.header-bar .actions { display: flex; gap: 8px; align-items: center; }
+</style>
+</head>
+<body data-theme="{{ theme }}">
+<div class="container">
+  <div class="header-bar">
+    <span class="title" data-i18n="title">Docker Pause Manager</span>
+    <div class="actions" id="headerActions">
+      <button class="btn btn-ghost btn-sm" data-action="settings" data-i18n="settings">设置</button>
+      <button class="btn btn-ghost btn-sm hidden" data-action="logout" data-i18n="logout">退出</button>
+    </div>
+  </div>
+
+  <div id="loginSection">
+    <div class="login-form">
+      <h2 data-i18n="login_title">管理员登录</h2>
+      <form id="loginForm">
+        <input type="password" name="password" data-i18n-placeholder="password" placeholder="密码" autofocus>
+        <button class="btn btn-primary" type="submit" data-i18n="login_btn">登录</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="mainContent" class="hidden">
+    <div class="stats" id="stats"></div>
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h2 data-i18n="container_status">容器状态</h2>
+      </div>
+      <div id="containerList"></div>
+    </div>
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h2 data-i18n="monitor_config">监控配置</h2>
+        <button class="btn btn-primary btn-sm" data-action="addContainer" data-i18n="add_container">添加容器</button>
+      </div>
+      <div id="configList"></div>
+    </div>
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h2 data-i18n="settings">设置</h2>
+      </div>
+      <div class="settings-grid" id="settingsPanel">
+        <div class="form-group">
+          <label data-i18n="global_timeout">全局空闲超时 (秒)</label>
+          <input type="number" id="settingGlobalTimeout" min="10" max="86400">
+        </div>
+        <div class="form-group">
+          <label data-i18n="check_interval">检查间隔 (秒)</label>
+          <input type="number" id="settingCheckInterval" min="5" max="3600">
+        </div>
+        <div class="form-group">
+          <label data-i18n="theme_label">主题</label>
+          <select id="settingTheme">
+            <option value="light" data-i18n="light">日间模式</option>
+            <option value="dark" data-i18n="dark">夜间模式</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label data-i18n="language">语言</label>
+          <select id="settingLanguage">
+            <option value="zh-CN">中文</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div class="form-group full">
+          <label data-i18n="change_password">修改密码</label>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <input type="password" id="settingCurPwd" data-i18n-placeholder="current_password" placeholder="当前密码" style="flex:1;min-width:120px;">
+            <input type="password" id="settingNewPwd" data-i18n-placeholder="new_password" placeholder="新密码" style="flex:1;min-width:120px;">
+            <input type="password" id="settingConfirmPwd" data-i18n-placeholder="confirm_password" placeholder="确认密码" style="flex:1;min-width:120px;">
+            <button class="btn btn-primary btn-sm" data-action="changePassword" data-i18n="change_password" style="white-space:nowrap;">修改密码</button>
+          </div>
+        </div>
+        <div class="full" style="display:flex; gap:8px;">
+          <button class="btn btn-primary btn-sm" data-action="saveSettings" data-i18n="save">保存</button>
+          <button class="btn btn-ghost btn-sm" data-action="refresh" data-i18n="refresh">刷新</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="modalOverlay" class="modal-overlay hidden">
+  <div class="modal">
+    <h3 id="modalTitle" data-i18n="add_container">添加容器</h3>
+    <form id="containerForm">
+      <div class="form-group">
+        <label data-i18n="container_name">容器名</label>
+        <select id="cNameSelect">
+          <option value="" data-i18n="select_container">从列表中选择</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label data-i18n="port_config">端口配置</label>
+        <div style="display:flex; gap:8px;">
+          <textarea id="cPorts" rows="4" style="flex:1; font-family:monospace; resize:vertical;"></textarea>
+          <div style="display:flex; flex-direction:column; gap:4px;">
+            <button type="button" class="btn btn-sm btn-primary" data-action="autoFillPorts" data-i18n="auto_fill">自动填充</button>
+            <button type="button" class="btn btn-sm btn-ghost" data-action="clearPorts" data-i18n="clear_ports">清空</button>
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label data-i18n="idle_timeout">空闲超时 (秒)</label>
+        <input type="number" id="cIdle" min="10" max="86400" placeholder="0=使用全局设置">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-action="closeModal" data-i18n="cancel">取消</button>
+        <button type="submit" class="btn btn-primary" data-i18n="save">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+let token = (new URLSearchParams(location.search).get('token') || '');
+let i18nData = {};
+let currentLang = '{{ lang }}';
+let currentTheme = '{{ theme }}';
+
+// ===== i18n =====
+async function loadI18n() {
+  try {
+    const r = await fetch('/api/i18n');
+    i18nData = await r.json();
+  } catch(e) { i18nData = {}; }
+  applyI18n();
+}
+
+function applyI18n() {
+  const lang = currentLang;
+  const dict = i18nData[lang] || i18nData['zh-CN'] || {};
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    if (dict[key]) {
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        el.placeholder = dict[key];
+      } else if (el.tagName === 'OPTION') {
+        el.textContent = dict[key];
+      } else {
+        el.textContent = dict[key];
+      }
+    }
+  });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    const key = el.getAttribute('data-i18n-placeholder');
+    if (dict[key]) el.placeholder = dict[key];
+  });
+  document.title = dict['title'] || 'Docker Pause Manager';
+}
+
+// ===== Theme =====
+function applyTheme(theme) {
+  document.body.setAttribute('data-theme', theme);
+  currentTheme = theme;
+  document.getElementById('settingTheme').value = theme;
+}
+
+// ===== Toast =====
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast toast-' + (type || 'success');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+// ===== API Call =====
+async function apiCall(path, method, body) {
+  const opts = { method: method || 'GET', headers: { 'Authorization': 'Bearer ' + token } };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  try {
+    const r = await fetch(path, opts);
+    if (r.status === 401) {
+      showToast((i18nData[currentLang] || {}).session_expired || 'Session expired', 'error');
+      setTimeout(() => location.href = '/', 2000);
+      return null;
+    }
+    if (!r.ok) { showToast((i18nData[currentLang] || {}).api_error + ': ' + r.status, 'error'); return null; }
+    return r.json();
+  } catch(e) { showToast('Network error', 'error'); return null; }
+}
+
+// ===== Login =====
+document.getElementById('loginForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const pwd = this.querySelector('input[name="password"]').value;
+  const r = await fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'password=' + encodeURIComponent(pwd) });
+  if (r.status === 302 || r.status === 303) {
+    const url = r.headers.get('Location') || '/';
+    location.href = url;
+  } else {
+    showToast((i18nData[currentLang] || {}).wrong_password || 'Wrong password', 'error');
+  }
+});
+
+// ===== Main =====
+async function loadStatus() {
+  const data = await apiCall('/api/status');
+  if (!data) return;
+  const dict = i18nData[currentLang] || {};
+  document.getElementById('stats').innerHTML =
+    '<div class="stat-box"><div class="num">' + data.total + '</div><div class="label">' + (dict.total || 'Total') + '</div></div>'
+    + '<div class="stat-box"><div class="num">' + data.running + '</div><div class="label">' + (dict.running || 'Running') + '</div></div>'
+    + '<div class="stat-box"><div class="num">' + data.paused + '</div><div class="label">' + (dict.paused || 'Paused') + '</div></div>';
+  let html = '<table><tr><th>' + (dict.container_name || 'Container') + '</th><th>' + (dict.status || 'Status') + '</th>'
+    + '<th>' + (dict.idle_time || 'Idle') + '</th><th>' + (dict.action || 'Action') + '</th></tr>';
+  for (const c of data.containers) {
+    html += '<tr><td><strong>' + c.name + '</strong></td>'
+      + '<td><span class="badge badge-' + c.status.replace(' ', '_') + '">' + c.status + '</span></td>'
+      + '<td>' + c.idle_seconds + 's</td><td>';
+    if (c.status === 'paused') html += '<button class="btn btn-success btn-sm" data-action="unpause" data-name="' + c.name + '">' + (dict.wake || 'Wake') + '</button>';
+    else if (c.status === 'running') html += '<button class="btn btn-warning btn-sm" data-action="pause" data-name="' + c.name + '">' + (dict.pause || 'Pause') + '</button>';
+    else html += '-';
+    html += '</td></tr>';
+  }
+  html += '</table>';
+  document.getElementById('containerList').innerHTML = html;
+}
+
+async function loadConfig() {
+  const data = await apiCall('/api/config');
+  if (!data) return;
+  document.getElementById('settingGlobalTimeout').value = data.global_idle_timeout || 300;
+  document.getElementById('settingCheckInterval').value = data.check_interval || 10;
+  document.getElementById('settingTheme').value = data.theme || 'light';
+  document.getElementById('settingLanguage').value = data.language || 'zh-CN';
+  currentLang = data.language || 'zh-CN';
+  applyTheme(data.theme || 'light');
+  renderConfigList(data.containers || {});
+  populateContainerSelect();
+  applyI18n();
+}
+
+function renderConfigList(containers) {
+  const el = document.getElementById('configList');
+  if (!el) return;
+  const dict = i18nData[currentLang] || {};
+  if (!containers || Object.keys(containers).length === 0) {
+    el.innerHTML = '<p style="color:var(--text2);">' + (dict.no_containers || 'No containers') + '</p>';
+    return;
+  }
+  let html = '';
+  for (const [name, cfg] of Object.entries(containers)) {
+    const ports = (cfg.ports || []).map(p => p.port + '/' + (p.proto || 'tcp')).join(', ');
+    html += '<div class="config-row"><div class="config-info">'
+      + '<span class="config-name">' + name + '</span>'
+      + '<span class="config-ports">' + ports + '</span>'
+      + '<span class="config-meta">' + ((cfg.idle_timeout || 'global') + 's') + '</span>'
+      + '</div><div class="config-actions">'
+      + '<button class="btn btn-sm btn-primary" data-action="editContainer" data-name="' + name + '">' + (dict.edit_container || 'Edit') + '</button>'
+      + '<button class="btn btn-sm btn-danger" data-action="deleteContainer" data-name="' + name + '">' + (dict.delete_container || 'Delete') + '</button>'
+      + '</div></div>';
+  }
+  el.innerHTML = html;
+}
+
+// ===== Container Select =====
+async function populateContainerSelect() {
+  const data = await apiCall('/api/containers');
+  const sel = document.getElementById('cNameSelect');
+  if (!sel) return;
+  const dict = i18nData[currentLang] || {};
+  if (!data || !data.containers) {
+    sel.innerHTML = '<option value="">' + (dict.load_failed || 'Load failed') + '</option>';
+    return;
+  }
+  sel.innerHTML = '<option value="">' + (dict.select_container || 'Select from list') + '</option>';
+  data.containers.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.name;
+    const pi = (c.ports && c.ports.length > 0) ? ' [' + c.ports.join(', ') + ']' : '';
+    opt.textContent = c.name + ' (' + c.status + pi + ')';
+    if (c.ports && c.ports.length > 0) opt.dataset.ports = JSON.stringify(c.ports);
+    sel.appendChild(opt);
+  });
+}
+
+function autoFillPorts() {
+  const sel = document.getElementById('cNameSelect');
+  const opt = sel.options[sel.selectedIndex];
+  if (opt && opt.dataset.ports) {
+    document.getElementById('cPorts').value = JSON.parse(opt.dataset.ports).join('\n');
+  }
+}
+
+function clearPorts() {
+  document.getElementById('cPorts').value = '';
+}
+
+// ===== Modals =====
+function openAddModal(name) {
+  document.getElementById('modalTitle').textContent = (i18nData[currentLang] || {}).add_container || 'Add Container';
+  document.getElementById('containerForm').reset();
+  document.getElementById('cNameSelect').value = '';
+  document.getElementById('cPorts').value = '';
+  document.getElementById('cIdle').value = '';
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  populateContainerSelect();
+}
+
+function openEditModal(name, cfg) {
+  document.getElementById('modalTitle').textContent = (i18nData[currentLang] || {}).edit_container || 'Edit';
+  document.getElementById('cNameSelect').value = name;
+  document.getElementById('cPorts').value = (cfg.ports || []).map(p => p.port + '/' + (p.proto || 'tcp')).join('\n');
+  document.getElementById('cIdle').value = cfg.idle_timeout || '';
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  populateContainerSelect().then(() => {
+    document.getElementById('cNameSelect').value = name;
+  });
+}
+
+function closeModal() {
+  document.getElementById('modalOverlay').classList.add('hidden');
+}
+
+// ===== Event Delegation =====
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.getAttribute('data-action');
+  const name = btn.getAttribute('data-name');
+
+  if (action === 'addContainer') { openAddModal(); }
+  else if (action === 'editContainer') {
+    apiCall('/api/config').then(data => {
+      if (data && data.containers && data.containers[name]) {
+        openEditModal(name, data.containers[name]);
+      }
+    });
+  }
+  else if (action === 'deleteContainer') {
+    const dict = i18nData[currentLang] || {};
+    if (!confirm((dict.confirm_delete || 'Delete') + ' ' + name + '?')) return;
+    apiCall('/api/config').then(data => {
+      if (!data) return;
+      const containers = { ...(data.containers || {}) };
+      delete containers[name];
+      apiCall('/api/config', 'POST', { containers }).then(r => {
+        if (r && r.success) { showToast((dict.saved || 'Saved'), 'success'); loadConfig(); loadStatus(); }
+      });
+    });
+  }
+  else if (action === 'closeModal') { closeModal(); }
+  else if (action === 'autoFillPorts') { autoFillPorts(); }
+  else if (action === 'clearPorts') { clearPorts(); }
+  else if (action === 'pause') {
+    apiCall('/api/pause/' + name, 'POST').then(() => { loadStatus(); });
+  }
+  else if (action === 'unpause') {
+    apiCall('/api/unpause/' + name, 'POST').then(() => { loadStatus(); });
+  }
+  else if (action === 'settings') {
+    document.getElementById('settingsPanel').scrollIntoView({ behavior: 'smooth' });
+  }
+  else if (action === 'logout') {
+    document.cookie = 'dpm_token=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+    location.href = '/';
+  }
+  else if (action === 'refresh') {
+    loadStatus(); loadConfig();
+  }
+  else if (action === 'saveSettings') {
+    const payload = {
+      global_idle_timeout: parseInt(document.getElementById('settingGlobalTimeout').value) || 300,
+      check_interval: parseInt(document.getElementById('settingCheckInterval').value) || 10,
+      theme: document.getElementById('settingTheme').value,
+      language: document.getElementById('settingLanguage').value,
+    };
+    apiCall('/api/config', 'POST', payload).then(r => {
+      if (r && r.success) {
+        currentLang = payload.language;
+        applyTheme(payload.theme);
+        applyI18n();
+        showToast((i18nData[currentLang] || {}).saved || 'Saved', 'success');
+      }
+    });
+  }
+  else if (action === 'changePassword') {
+    const cur = document.getElementById('settingCurPwd').value;
+    const pwd = document.getElementById('settingNewPwd').value;
+    const confirm = document.getElementById('settingConfirmPwd').value;
+    const dict = i18nData[currentLang] || {};
+    if (pwd !== confirm) { showToast(dict.password_mismatch || 'Passwords do not match', 'error'); return; }
+    if (!cur || !pwd) { showToast('Fill all fields', 'error'); return; }
+    apiCall('/api/login', 'POST', { password: cur }).then(r => {
+      if (!r || !r.success) { showToast(dict.wrong_current || 'Wrong current password', 'error'); return; }
+      apiCall('/api/config', 'POST', { admin_password: pwd }).then(r2 => {
+        if (r2 && r2.success) {
+          token = r.token;
+          showToast(dict.password_changed || 'Password changed', 'success');
+          document.getElementById('settingCurPwd').value = '';
+          document.getElementById('settingNewPwd').value = '';
+          document.getElementById('settingConfirmPwd').value = '';
+        }
+      });
+    });
+  }
+});
+
+// ===== Container Form Submit =====
+document.getElementById('containerForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const name = document.getElementById('cNameSelect').value;
+  const portsText = document.getElementById('cPorts').value.trim();
+  const idle = parseInt(document.getElementById('cIdle').value) || 0;
+  const dict = i18nData[currentLang] || {};
+  if (!name) { showToast(dict.fill_name || 'Fill name', 'error'); return; }
+  if (!portsText) { showToast(dict.fill_port || 'Fill ports', 'error'); return; }
+  const ports = portsText.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+    const [port, proto] = l.split('/');
+    return { port: parseInt(port), proto: (proto || 'tcp').toLowerCase() };
+  }).filter(p => !isNaN(p.port) && p.port > 0 && p.port <= 65535);
+  if (ports.length === 0) { showToast(dict.port_error || 'Invalid port format', 'error'); return; }
+  const cfg = await apiCall('/api/config');
+  if (!cfg) return;
+  const containers = { ...(cfg.containers || {}) };
+  containers[name] = { ports, idle_timeout: idle > 0 ? idle : undefined };
+  const r = await apiCall('/api/config', 'POST', { containers });
+  if (r && r.success) {
+    showToast(dict.saved || 'Saved', 'success');
+    closeModal();
+    loadConfig();
+    loadStatus();
+  }
+});
+
+// ===== Init =====
+if (token) {
+  document.getElementById('loginSection').classList.add('hidden');
+  document.getElementById('mainContent').classList.remove('hidden');
+  document.querySelector('[data-action="logout"]').classList.remove('hidden');
+  loadI18n().then(() => {
+    loadConfig();
+    loadStatus();
+    setInterval(loadStatus, 10000);
+  });
+} else {
+  loadI18n();
+}
+</script>
+</body>
+</html>

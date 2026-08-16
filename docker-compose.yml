@@ -1,7 +1,7 @@
 services:
   docker-pause-manager:
     build: .
-    image: docker-pause-manager:local
+    image: ghcr.io/jiushizhu2024/docker-pause-manager:latest
     container_name: docker-pause-manager
     restart: unless-stopped
     ports:
@@ -11,14 +11,6 @@ services:
     environment:
       - CONFIG_PATH=/app/config.json
       - STATE_PATH=/app/state.json
-      - LISTEN_HOST=0.0.0.0
-      - LISTEN_PORT=5287
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    networks:
-      - pause-manager-net
-
-networks:
-  pause-manager-net:
-    driver: bridge
