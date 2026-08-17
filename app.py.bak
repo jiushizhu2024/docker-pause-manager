@@ -7,7 +7,7 @@ Docker Pause Manager - Web UI
 """
 import json, os, time, threading, subprocess, logging, hashlib, secrets
 from functools import wraps
-from flask import Flask, request, jsonify, send_file, send_from_directory, make_response
+from flask import Flask, request, jsonify, send_file, make_response
 
 # ===== Docker SDK 兼容性修复 =====
 # 使用 requests-unixsocket2 替代 docker SDK 自带适配器
