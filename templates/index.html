@@ -371,6 +371,43 @@
         </div>
     </div>
     
+    <!-- Edit Container Modal -->
+    <div class="modal-overlay" id="edit-modal">
+        <div class="modal">
+            <h3 data-i18n="edit_container">编辑容器</h3>
+            <div class="form-group">
+                <label data-i18n="containers">容器名</label>
+                <input type="text" class="form-control" id="edit-container-name" readonly>
+            </div>
+            <div class="form-group">
+                <label data-i18n="ports">端口列表</label>
+                <div id="edit-ports-list"></div>
+                <div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border)">
+                    <label data-i18n="custom_ports">手动添加端口</label>
+                    <div style="display:flex; gap:10px; margin-top:8px">
+                        <input type="number" class="form-control" id="edit-custom-port" placeholder="端口号" style="width:120px">
+                        <select class="form-control" id="edit-custom-proto" style="width:100px">
+                            <option value="tcp">TCP</option>
+                            <option value="udp">UDP</option>
+                        </select>
+                        <button class="btn btn-sm btn-primary" onclick="addEditCustomPort()" data-i18n="add_port">添加</button>
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="edit-custom-timeout">
+                    <span data-i18n="per_container_timeout">单独设置超时</span>
+                </label>
+                <input type="number" class="form-control" id="edit-timeout-value" placeholder="秒" style="margin-top:8px; display:none">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-danger" onclick="closeEditModal()" data-i18n="cancel">取消</button>
+                <button class="btn btn-success" onclick="saveEditContainer()" data-i18n="confirm">确认</button>
+            </div>
+        </div>
+    </div>
+    
     <!-- Settings Modal -->
     <div class="modal-overlay" id="settings-modal">
         <div class="modal">
@@ -387,6 +424,7 @@
                     <label data-i18n="language">语言</label>
                     <select class="form-control" id="setting-language">
                         <option value="zh-CN">简体中文</option>
+                        <option value="zh-TW">繁體中文</option>
                         <option value="en">English</option>
                     </select>
                 </div>
@@ -509,6 +547,7 @@
                             onclick="${c.status === 'paused' ? `unpause('${c.name}')` : `pause('${c.name}')`}">
                             ${btnText}
                         </button>
+                        <button class="btn btn-sm btn-primary" onclick="editContainer('${c.name}')">${i18nData['edit'] || 'Edit'}</button>
                         <button class="btn btn-sm btn-danger" onclick="removeContainer('${c.name}')">${deleteText}</button>
                     </td>
                 </tr>`;
@@ -518,10 +557,84 @@
         async function pause(name) { await api(`/api/pause/${name}`, {method:'POST'}); fetchStatus(); }
         async function unpause(name) { await api(`/api/unpause/${name}`, {method:'POST'}); fetchStatus(); }
         async function removeContainer(name) {
-            if (!confirm(`${i18nData['remove'] || 'Remove'} ${name}?`)) return;
+            if (!confirm(`${i18nData['remove_confirm'] || 'Confirm removal'} ${name}?`)) return;
             await api('/api/remove_container', {method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({name})});
             fetchStatus();
+        }
+        
+        // Edit Container Modal
+        let currentEditName = null;
+        let currentEditPorts = [];
+        let currentEditTimeout = null;
+        
+        async function editContainer(name) {
+            currentEditName = name;
+            const container = await api(`/api/containers`);
+            const c = container.find(x => x.name === name);
+            if (!c) return;
+            
+            currentEditPorts = (c.ports || []).map(p => ({port: p.port, proto: p.proto}));
+            currentEditTimeout = c.idle_timeout || null;
+            
+            document.getElementById('edit-container-name').value = name;
+            renderEditPorts();
+            document.getElementById('edit-modal').classList.add('active');
+        }
+        
+        function closeEditModal() { 
+            document.getElementById('edit-modal').classList.remove('active'); 
+            currentEditName = null;
+            currentEditPorts = [];
+            currentEditTimeout = null;
+        }
+        
+        function renderEditPorts() {
+            const portsDiv = document.getElementById('edit-ports-list');
+            portsDiv.innerHTML = '';
+            currentEditPorts.forEach(p => {
+                const tag = document.createElement('span');
+                tag.className = 'port-tag';
+                tag.innerHTML = `${p.port}/${p.proto} <button onclick="removeEditPort(${p.port}, '${p.proto}')" style="background:none;border:none;cursor:pointer">×</button>`;
+                portsDiv.appendChild(tag);
+            });
+        }
+        
+        function removeEditPort(port, proto) {
+            currentEditPorts = currentEditPorts.filter(p => !(p.port === port && p.proto === proto));
+            renderEditPorts();
+        }
+        
+        function addEditCustomPort() {
+            const port = parseInt(document.getElementById('edit-custom-port').value);
+            const proto = document.getElementById('edit-custom-proto').value;
+            if (port) {
+                currentEditPorts.push({port, proto});
+                renderEditPorts();
+                document.getElementById('edit-custom-port').value = '';
+            }
+        }
+        
+        document.getElementById('edit-custom-timeout').addEventListener('change', function() {
+            document.getElementById('edit-timeout-value').style.display = this.checked ? 'block' : 'none';
+        });
+        
+        async function saveEditContainer() {
+            if (!currentEditName) return;
+            
+            if (!currentEditPorts.length) {
+                return alert(i18nData['add_ports'] || '请添加端口');
+            }
+            
+            const customTimeout = document.getElementById('edit-custom-timeout').checked;
+            const timeout = customTimeout ? parseInt(document.getElementById('edit-timeout-value').value) : null;
+            
+            await api('/api/edit_container', {method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({name: currentEditName, ports: currentEditPorts, idle_timeout: timeout})});
+            
+            closeEditModal();
+            fetchStatus();
+            showToast(i18nData['saved'] || '已保存', 'success');
         }
         
         // Add Container Modal

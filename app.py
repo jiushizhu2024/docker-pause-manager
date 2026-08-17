@@ -567,6 +567,49 @@ def api_remove_container():
 
     return jsonify({"success": True})
 
+@app.route("/api/edit_container", methods=["POST"])
+@token_required
+def api_edit_container():
+    """编辑容器配置（端口和空闲超时）"""
+    data = request.get_json()
+    container_name = data.get("name")
+    ports = data.get("ports", [])
+    idle_timeout = data.get("idle_timeout")
+
+    if not container_name:
+        return jsonify({"error": "容器名不能为空"}), 400
+    if not ports:
+        return jsonify({"error": "端口不能为空"}), 400
+
+    # 检查容器是否存在
+    container = get_container(container_name)
+    if not container:
+        return jsonify({"error": f"容器 {container_name} 不存在"}), 404
+
+    # 更新配置
+    MONITORED_CONTAINERS[container_name] = {
+        "ports": ports,
+        "idle_timeout": int(idle_timeout) if idle_timeout else DEFAULT_IDLE_TIMEOUT
+    }
+
+    # 更新监控器状态
+    if container_name in monitor.container_states:
+        monitor.container_states[container_name]["ports"] = ports
+        if idle_timeout:
+            monitor.container_states[container_name]["idle_timeout"] = int(idle_timeout)
+
+    # 保存配置
+    save_config({"admin_password": ADMIN_PASSWORD, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
+                 "check_interval": CHECK_INTERVAL, "net_interface": NETWORK_INTERFACE,
+                 "theme": CONFIG.get("theme", "light"), "language": CONFIG.get("language", "zh-CN"),
+                 "containers": MONITORED_CONTAINERS})
+
+    # 重新初始化包计数器
+    init_packet_counter()
+    log.info(f"[{container_name}] 配置已更新，端口: {ports}, 空闲超时: {idle_timeout or DEFAULT_IDLE_TIMEOUT}s")
+
+    return jsonify({"success": True, "message": f"已更新 {container_name}"})
+
 @app.route("/api/settings", methods=["GET", "PUT"])
 def api_settings():
     """获取或更新全局设置"""
@@ -647,6 +690,7 @@ def api_i18n(lang):
             "containers": "监控容器",
             "add_container": "添加容器",
             "remove": "移除",
+            "edit": "编辑",
             "idle_timeout": "空闲超时",
             "seconds": "秒",
             "global_idle_timeout": "全局空闲超时",
@@ -670,7 +714,64 @@ def api_i18n(lang):
             "udp": "UDP",
             "add_port": "添加端口",
             "per_container_timeout": "单独超时设置",
-            "use_global": "使用全局"
+            "use_global": "使用全局",
+            "save": "保存",
+            "cancel": "取消",
+            "confirm": "确认",
+            "edit_container": "编辑容器",
+            "select_container": "请选择容器",
+            "add_ports": "请添加端口",
+            "added": "已添加",
+            "saved": "已保存",
+            "no_containers": "暂无监控容器，点击\"添加容器\"开始",
+            "remove_confirm": "确认移除",
+            "password": "请输入密码"
+        },
+        "zh-TW": {
+            "title": "Docker Pause Manager",
+            "pause": "暫停",
+            "unpause": "喚醒",
+            "start": "啟動",
+            "settings": "全域設定",
+            "containers": "監控容器",
+            "add_container": "新增容器",
+            "remove": "移除",
+            "edit": "編輯",
+            "idle_timeout": "閒置超時",
+            "seconds": "秒",
+            "global_idle_timeout": "全域閒置超時",
+            "theme": "主題",
+            "language": "語言",
+            "light": "亮色",
+            "dark": "暗色",
+            "refresh": "重新整理",
+            "status": "狀態",
+            "running": "執行中",
+            "paused": "已暫停",
+            "idle_time": "閒置時間",
+            "ports": "埠",
+            "select_all": "全選",
+            "selected": "已選",
+            "auto_add_ports": "自動新增埠",
+            "custom_ports": "手動新增埠",
+            "port": "埠",
+            "proto": "協定",
+            "tcp": "TCP",
+            "udp": "UDP",
+            "add_port": "新增埠",
+            "per_container_timeout": "個別超時設定",
+            "use_global": "使用全域",
+            "save": "儲存",
+            "cancel": "取消",
+            "confirm": "確認",
+            "edit_container": "編輯容器",
+            "select_container": "請選擇容器",
+            "add_ports": "請新增埠",
+            "added": "已新增",
+            "saved": "已儲存",
+            "no_containers": "暫無監控容器，點擊\"新增容器\"開始",
+            "remove_confirm": "確認移除",
+            "password": "請輸入密碼"
         },
         "en": {
             "title": "Docker Pause Manager",
@@ -681,6 +782,7 @@ def api_i18n(lang):
             "containers": "Containers",
             "add_container": "Add Container",
             "remove": "Remove",
+            "edit": "Edit",
             "idle_timeout": "Idle Timeout",
             "seconds": "seconds",
             "global_idle_timeout": "Global Idle Timeout",
@@ -704,7 +806,18 @@ def api_i18n(lang):
             "udp": "UDP",
             "add_port": "Add Port",
             "per_container_timeout": "Per-Container Timeout",
-            "use_global": "Use Global"
+            "use_global": "Use Global",
+            "save": "Save",
+            "cancel": "Cancel",
+            "confirm": "Confirm",
+            "edit_container": "Edit Container",
+            "select_container": "Please select a container",
+            "add_ports": "Please add ports",
+            "added": "Added",
+            "saved": "Saved",
+            "no_containers": "No containers being monitored, click 'Add Container' to start",
+            "remove_confirm": "Confirm removal",
+            "password": "Enter password"
         }
     }
     return jsonify(i18n.get(lang, i18n["en"]))
