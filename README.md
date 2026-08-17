@@ -163,6 +163,10 @@ environment:
 
 ---
 
+**如果觉得好用，欢迎点个 Star，感谢支持！⭐**
+
+---
+
 <a name="traditional"></a>
 ## 🇹🇼 繁體中文版
 
@@ -320,6 +324,10 @@ environment:
 
 ---
 
+**如果覺得好用，歡迎點個 Star，感謝支持！⭐**
+
+---
+
 <a name="english"></a>
 ## 🇬🇧 English Version
 
@@ -474,6 +482,10 @@ Change password after first login:
 3. Auto-pause containers idle beyond the set time
 4. Auto-unpause when access requests are detected
 5. All configs saved to `config.json`, auto-loaded on restart
+
+---
+
+**If you find this useful, please consider giving it a Star, thank you! ⭐**
 
 ---
 
