@@ -228,10 +228,38 @@ CHECK_INTERVAL = CONFIG.get("check_interval", 10)
 MONITORED_CONTAINERS = CONFIG.get("containers", {})
 NETWORK_INTERFACE = CONFIG.get("net_interface", "eth0")
 
-# ========== AF_PACKET 包嗅探 ==========
+# ========== AF_PACKET 包嗅探 ==========\
+
+class EventQueue:
+    """事件队列：存储需要唤醒的端口事件"""
+    def __init__(self):
+        self.events = {}  # port -> set of container names
+        self.lock = threading.Lock()
+        self.condition = threading.Condition(self.lock)
+    
+    def add(self, port, container_name):
+        """添加唤醒事件"""
+        with self.condition:
+            if port not in self.events:
+                self.events[port] = set()
+            self.events[port].add(container_name)
+            self.condition.notify_all()
+    
+    def get_all(self):
+        """获取所有事件并清空队列"""
+        with self.condition:
+            if not self.events:
+                return {}
+            result = {port: set(names) for port, names in self.events.items()}
+            self.events.clear()
+            return result
+
+event_queue = EventQueue()
+
 class PacketCounter:
     ETHERTYPE_IP = 0x0800
     PROTO_TCP = 6
+    PROTO_TCP_SYN = 0x02  # TCP SYN flag for connection initiation
     PROTO_UDP = 17
     
     def __init__(self, interface, ports):
@@ -365,6 +393,8 @@ class PacketCounter:
         if port in self.ports:
             with self.lock:
                 self.packet_counts[port] = self.packet_counts.get(port, 0) + 1
+            # 立即添加到唤醒队列
+            event_queue.add(port, None)  # None 表示任意容器
     
     def get_count(self, port):
         with self.lock:
@@ -939,12 +969,54 @@ def monitor_loop():
             log.error(f"监控循环异常: {e}")
         time.sleep(CHECK_INTERVAL)
 
+def event_handler_loop():
+    """事件处理循环：立即唤醒休眠容器"""
+    while monitor.running:
+        try:
+            # 等待事件队列有数据（超时 1 秒）
+            with event_queue.condition:
+                event_queue.condition.wait(timeout=1)
+
+            # 获取所有待处理事件
+            events = event_queue.get_all()
+            if not events:
+                continue
+
+            log.info(f"[事件队列] 检测到流量，ports={list(events.keys())}")
+
+            # 立即唤醒匹配的容器
+            for port, container_names in events.items():
+                for name, state in monitor.container_states.items():
+                    # 检查容器是否在监听该端口
+                    matching_ports = [p for p in state["ports"] if int(p.get("port", 0)) == port]
+                    if matching_ports and state["is_paused_by_us"]:
+                        log.info(f"[事件驱动] [{name}] 立即唤醒 (port={port})")
+                        unpause_container(name)
+                        state["idle_seconds"] = 0
+                        state["is_paused_by_us"] = False
+                        # 保存状态
+                        monitor._save_state()
+        except Exception as e:
+            log.error(f"[事件处理] 异常: {e}")
+
 def has_new_connection(container_name, ports):
+    """检查是否有新连接（使用事件队列优先）"""
     global packet_counter
     if packet_counter is None:
         return _has_new_connection_conntrack(container_name, ports)
     
     try:
+        # 先检查事件队列（立即唤醒）
+        events = event_queue.get_all()
+        if events:
+            log.info(f"[{container_name}] 事件队列检测到流量，ports={list(events.keys())}")
+            for port in ports:
+                port_num = int(port.get("port", 0))
+                if port_num in events:
+                    log.info(f"[{container_name}] 已唤醒 (event-driven, port={port_num})")
+                    return True
+        
+        # 如果事件队列为空，使用轮询方式（兼容性检查）
         for port_info in ports:
             port = int(port_info.get("port", 0))
             if port in packet_counter.ports:
@@ -990,6 +1062,11 @@ def index():
 monitor.update_config(MONITORED_CONTAINERS)
 init_packet_counter()
 
+# 启动事件处理线程（立即唤醒）
+event_thread = threading.Thread(target=event_handler_loop, daemon=True)
+event_thread.start()
+
+# 启动监控循环（轮询检查空闲超时）
 t = threading.Thread(target=monitor_loop, daemon=True)
 t.start()
 
@@ -997,6 +1074,7 @@ log.info(f"Docker Pause Manager 启动完成，监听 http://{LISTEN_HOST}:{LIST
 log.info(f"监控 {len(MONITORED_CONTAINERS)} 个容器，空闲超时 {DEFAULT_IDLE_TIMEOUT}s，检查间隔 {CHECK_INTERVAL}s")
 if packet_counter:
     log.info(f"AF_PACKET 包嗅探已启动，监听端口 {sorted(packet_counter.ports)}，接口 {NETWORK_INTERFACE}")
+log.info("事件驱动唤醒已启用，检测到流量立即唤醒容器")
 
 if __name__ == "__main__":
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False)
