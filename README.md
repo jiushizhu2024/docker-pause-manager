@@ -1,13 +1,13 @@
 # Docker Pause Manager
 
 <p align="center">
-  <strong>中文</strong> | <a href="#chinese">中文版</a> | <a href="#english">English</a>
+  <strong>中文</strong> | <a href="#chinese">简体</a> | <a href="#traditional">繁體</a> | <a href="#english">English</a>
 </p>
 
 ---
 
 <a name="chinese"></a>
-## 🇨🇳 中文版
+## 🇨🇳 简体中文版
 
 # Docker Pause Manager
 
@@ -138,38 +138,16 @@ environment:
   - LISTEN_PORT=8080  # 改为 8080
 ```
 
-## 📁 文件结构
+## 🔐 默认密码与安全
 
-```
-docker-pause-manager/
-├── docker-compose.yml     # Docker Compose 配置
-├── Dockerfile             # 镜像构建文件
-├── app.py                 # 主应用程序
-├── templates/
-│   └── index.html         # Web UI 界面
-└── README.md              # 说明文档
-```
+**初始管理员密码**: `admin123`
 
-## 🔧 常用命令
+首次登录后请立即修改密码：
+1. 点击右上角「设置」按钮
+2. 在「修改管理密码」区域输入当前密码和新密码
+3. 点击「修改」保存
 
-```bash
-# 启动
-docker compose up -d
-
-# 查看日志
-docker logs -f docker-pause-manager
-
-# 停止
-docker compose stop
-
-# 重启
-docker compose restart
-
-# 更新
-docker compose pull && docker compose up -d
-```
-
-## 🔐 安全建议
+### 安全建议
 
 1. **修改默认密码**：首次登录后立即修改密码
 2. **限制访问**：使用防火墙限制只有内网可访问 Web UI
@@ -182,6 +160,163 @@ docker compose pull && docker compose up -d
 3. 当容器空闲超过设定时间，自动 pause
 4. 检测到访问请求时，自动 unpause
 5. 所有配置保存到 `config.json`，重启后自动加载
+
+---
+
+<a name="traditional"></a>
+## 🇹🇼 繁體中文版
+
+# Docker Pause Manager
+
+基於 AF_PACKET 包嗅探的 Docker 容器自動休眠管理器。當容器在設定時間內沒有網路流量時自動 pause 釋放資源，有訪問時自動喚醒。
+
+## ✨ 專案特點
+
+- **智慧休眠**：基於真實網路流量檢測，而非埠掃描，準確率高
+- **自動喚醒**：偵測到訪問請求後瞬間 unpause，用戶無感知
+- **多埠支援**：支援 TCP/UDP 多埠容器（如媒體伺服器）
+- **Web UI**：簡潔易用的管理介面，支援中/英/繁體
+- **高對比度**：亮色/暗色主題，適合各種使用環境
+- **安全認證**：管理員密碼保護，防止未授權訪問
+
+## 🚀 優勢
+
+| 特性 | 說明 |
+|------|------|
+| **資源節約** | 閒置容器釋放 CPU 和記憶體，降低主機負載 |
+| **無需修改容器** | 監聽宿主機網路介面，容器本身無需修改 |
+| **低開銷** | 使用 AF_PACKET 原始套接字，效能優於 iptables |
+| **即插即用** | 一行 docker-compose.yml 即可部署 |
+| **持久化配置** | 配置保存在 `config.json`，容器重啟不丟失 |
+
+## 📋 docker-compose.yml 詳解
+
+```yaml
+services:
+  docker-pause-manager:
+    image: ghcr.io/jiushizhu2024/docker-pause-manager:latest  # 映像地址
+    container_name: docker-pause-manager                       # 容器名稱
+    restart: unless-stopped                                    # 自動重啟策略
+    network_mode: host                                         # 主機網路（必需：用於 AF_PACKET 嗅探）
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock             # Docker Socket（必需）
+    environment:
+      - CONFIG_PATH=/app/config.json                          # 配置檔案路徑
+      - STATE_PATH=/app/state.json                            # 狀態檔案路徑
+      - LISTEN_HOST=0.0.0.0                                   # 監聽地址（0.0.0.0=所有介面）
+      - LISTEN_PORT=5287                                      # Web UI 埠
+    cap_add:
+      - NET_ADMIN                                             # 網路管理權限（必需）
+      - NET_RAW                                               # 原始套接字權限（必需）
+```
+
+### 網路模式說明
+
+`network_mode: host` 是必需的，原因：
+1. **AF_PACKET 包嗅探**：需要監聽所有網路流量，host 網路才能捕獲宿主機流量
+2. **容器直通**：容器可以直接使用宿主機網路介面
+
+> **注意**：host 模式下不能使用 `ports` 映射，埠透過 `LISTEN_PORT` 環境變數配置。
+
+## 🛠️ 部署步驟
+
+### 方法一：直接複製 docker-compose.yml（推薦）
+
+```bash
+# 1. 建立目錄
+mkdir docker-pause-manager && cd docker-pause-manager
+
+# 2. 建立 docker-compose.yml 檔案
+cat > docker-compose.yml << 'EOF'
+services:
+  docker-pause-manager:
+    image: ghcr.io/jiushizhu2024/docker-pause-manager:latest
+    container_name: docker-pause-manager
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - CONFIG_PATH=/app/config.json
+      - STATE_PATH=/app/state.json
+      - LISTEN_HOST=0.0.0.0
+      - LISTEN_PORT=5287
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+EOF
+
+# 3. 啟動容器
+docker compose up -d
+
+# 4. 訪問 Web UI
+# http://<伺服器IP>:5287
+# 預設密碼: admin123
+```
+
+### 方法二：克隆倉庫
+
+```bash
+git clone https://github.com/jiushizhu2024/docker-pause-manager.git
+cd docker-pause-manager
+docker compose up -d
+```
+
+### 方法三：使用 Docker 命令
+
+```bash
+docker run -d \
+  --name docker-pause-manager \
+  --restart unless-stopped \
+  --network host \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e LISTEN_HOST=0.0.0.0 \
+  -e LISTEN_PORT=5287 \
+  --cap-add NET_ADMIN \
+  --cap-add NET_RAW \
+  ghcr.io/jiushizhu2024/docker-pause-manager:latest
+```
+
+## ⚙️ 配置說明
+
+### 環境變數
+
+| 變數 | 說明 | 預設值 |
+|------|------|--------|
+| `LISTEN_HOST` | 監聽地址 | `0.0.0.0` |
+| `LISTEN_PORT` | Web UI 埠 | `5287` |
+| `CONFIG_PATH` | 配置檔案路徑 | `/app/config.json` |
+| `STATE_PATH` | 狀態檔案路徑 | `/app/state.json` |
+
+### 修改埠
+
+```yaml
+environment:
+  - LISTEN_PORT=8080  # 改為 8080
+```
+
+## 🔐 預設密碼與安全
+
+**初始管理員密碼**: `admin123`
+
+首次登入後請立即修改密碼：
+1. 點擊右上角「設定」按鈕
+2. 在「修改管理密碼」區域輸入當前密碼和新密碼
+3. 點擊「修改」儲存
+
+### 安全建議
+
+1. **修改預設密碼**：首次登入後立即修改密碼
+2. **限制訪問**：使用防火牆限制只有內網可訪問 Web UI
+3. **不暴露埠**：`LISTEN_HOST` 預設 `0.0.0.0`，如需限制可改為 `127.0.0.1`
+
+## 📝 工作流程
+
+1. 啟動後監聽指定網路介面的所有流量
+2. 輪詢所有執行中的容器，檢測埠流量
+3. 當容器空閒超過設定時間，自動 pause
+4. 偵測到訪問請求時，自動 unpause
+5. 所有配置儲存到 `config.json`，重啟後自動載入
 
 ---
 
@@ -317,38 +452,16 @@ environment:
   - LISTEN_PORT=8080  # Change to 8080
 ```
 
-## 📁 File Structure
+## 🔐 Default Password & Security
 
-```
-docker-pause-manager/
-├── docker-compose.yml     # Docker Compose config
-├── Dockerfile             # Image build file
-├── app.py                 # Main application
-├── templates/
-│   └── index.html         # Web UI interface
-└── README.md              # Documentation
-```
+**Initial Admin Password**: `admin123`
 
-## 🔧 Common Commands
+Change password after first login:
+1. Click the Settings button (top right)
+2. In the "Change Password" section, enter current and new password
+3. Click "Change" to save
 
-```bash
-# Start
-docker compose up -d
-
-# View logs
-docker logs -f docker-pause-manager
-
-# Stop
-docker compose stop
-
-# Restart
-docker compose restart
-
-# Update
-docker compose pull && docker compose up -d
-```
-
-## 🔐 Security Tips
+### Security Tips
 
 1. **Change Default Password**: Change password immediately after first login
 2. **Limit Access**: Use firewall to restrict Web UI to internal network only
