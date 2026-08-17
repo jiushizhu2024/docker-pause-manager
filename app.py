@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Docker Pause Manager - Web UI
-自动 pause/unpause Docker 容器，基于 conntrack NEW 连接检测唤醒，空闲超时 pause。
-支持多端口容器：一个容器可监控多个 TCP/UDP 端口，任一端口有连接即唤醒，全部端口空闲才 pause。
+自动 pause/unpause Docker 容器，基于 AF_PACKET 包嗅探检测流量，空闲超时 pause。
+支持多端口容器：一个容器可监控多个 TCP/UDP 端口，有流量即唤醒，全部空闲才 pause。
 支持管理员登录认证、自动端口选择。
 """
-import json, os, time, threading, subprocess, logging, hashlib, secrets
+import json, os, time, threading, subprocess, logging, hashlib, secrets, socket as socketlib, struct, re
 from functools import wraps
 from flask import Flask, request, jsonify, send_file, send_from_directory, make_response
 
@@ -127,6 +127,7 @@ DEFAULT_CONFIG = {
     "admin_password": "admin123",
     "idle_timeout": 300,
     "check_interval": 10,
+    "net_interface": "eth0",
     "containers": {}
 }
 
@@ -176,6 +177,201 @@ CHECK_INTERVAL = CONFIG.get("check_interval", 10)
 
 # 监控的容器列表
 MONITORED_CONTAINERS = CONFIG.get("containers", {})
+NETWORK_INTERFACE = CONFIG.get("net_interface", "eth0")
+
+# ========== AF_PACKET 包嗅探 ==========
+class PacketCounter:
+    """使用 AF_PACKET 嗅探网络包，统计目标端口流量"""
+    
+    ETHERTYPE_IP = 0x0800
+    PROTO_TCP = 6
+    PROTO_UDP = 17
+    
+    def __init__(self, interface, ports):
+        self.interface = interface
+        self.ports = set(ports)
+        self.packet_counts = {}  # {port: count}
+        self.lock = threading.Lock()
+        self.running = False
+        self.thread = None
+        self.sock = None
+        self.interfaces = []
+    
+    def start(self, ports=None):
+        """启动包嗅探线程（监听所有相关接口）"""
+        if self.running:
+            return
+        if ports is not None:
+            self.ports = set(ports)
+        # 自动发现 Docker bridge 接口和物理接口
+        self.interfaces = self._discover_interfaces()
+        log.info(f"[AF_PACKET] 接口列表: {self.interfaces}")
+        
+        self.running = True
+        self.sock = None
+        self.thread = threading.Thread(target=self._rx_loop, daemon=True)
+        self.thread.start()
+        time.sleep(1)  # 等待 socket 初始化
+        if self.sock:
+            log.info(f"[AF_PACKET] 启动包嗅探，监听 {self.interfaces}，端口 {sorted(self.ports)}")
+        else:
+            log.error("[AF_PACKET] 启动失败")
+    
+    def _discover_interfaces(self):
+        """发现需要监听的网络接口（物理接口 + Docker bridge）"""
+        interfaces = []
+        try:
+            # 添加物理接口
+            interfaces.append(self.interface)
+            # 添加 Docker bridge 接口（从 /proc/net/dev 或 ip 命令）
+            try:
+                import subprocess
+                result = subprocess.run(["ip", "link", "show"], capture_output=True, text=True, timeout=5)
+                for line in result.stdout.split("\n"):
+                    if line.strip().startswith("br-") and ": <" in line:
+                        iface = line.split(":")[0].strip()
+                        interfaces.append(iface)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                # 如果 ip 命令不可用，尝试从 /proc/net/dev 读取
+                try:
+                    with open("/proc/net/dev", "r") as f:
+                        for line in f:
+                            if line.strip().startswith("br-"):
+                                iface = line.split(":")[0].strip()
+                                interfaces.append(iface)
+                except:
+                    pass
+        except Exception as e:
+            log.debug(f"发现接口失败: {e}")
+        return list(set(interfaces))  # 去重
+    
+    def stop(self):
+        """停止包嗅探"""
+        self.running = False
+        if self.sock:
+            try:
+                self.sock.close()
+            except:
+                pass
+        if self.thread:
+            self.thread.join(timeout=2)
+        log.info("[AF_PACKET] 包嗅探已停止")
+    
+    def _rx_loop(self):
+        """接收并解析网络包（监听多个接口）"""
+        import threading
+
+        sockets = []
+
+        def _listen_iface(iface):
+            sock = None
+            try:
+                sock = socketlib.socket(socketlib.AF_PACKET, socketlib.SOCK_RAW, socketlib.htons(self.ETHERTYPE_IP))
+                sock.bind((iface, self.ETHERTYPE_IP))
+                sock.settimeout(1.0)
+                log.info(f"[AF_PACKET] 监听接口 {iface}")
+                while self.running:
+                    try:
+                        data = sock.recv(2048)
+                        self._parse_packet(data)
+                    except socketlib.timeout:
+                        continue
+                    except Exception as e:
+                        if self.running:
+                            log.debug(f"[AF_PACKET] {iface}: {e}")
+            except Exception as e:
+                log.warning(f"[AF_PACKET] 启动 {iface} 失败: {e}")
+            finally:
+                if sock:
+                    try:
+                        sock.close()
+                    except:
+                        pass
+
+        # 启动多线程监听所有接口
+        threads = []
+        for iface in self.interfaces:
+            t = threading.Thread(target=_listen_iface, args=(iface,), daemon=True)
+            t.start()
+            threads.append(t)
+
+        # 等待所有线程
+        while self.running:
+            time.sleep(1)
+
+    def _parse_packet(self, data):
+        """解析以太网帧"""
+        if len(data) < 34:  # 最小以太网帧 + IP 头
+            return
+        
+        # 跳过以太网头（14字节）
+        eth_type = struct.unpack('!H', data[12:14])[0]
+        if eth_type != self.ETHERTYPE_IP:
+            return
+        
+        # IP 头
+        ip_header = data[14:]
+        if len(ip_header) < 20:
+            return
+        
+        proto = ip_header[9]
+        total_len = struct.unpack('!H', ip_header[2:4])[0]
+        
+        if proto == self.PROTO_TCP:
+            # TCP 头（20字节）
+            if len(ip_header) < 32:
+                return
+            src_port = struct.unpack('!H', ip_header[20:22])[0]
+            dst_port = struct.unpack('!H', ip_header[22:24])[0]
+            self._count_port(src_port)
+            self._count_port(dst_port)
+        
+        elif proto == self.PROTO_UDP:
+            # UDP 头（8字节）
+            if len(ip_header) < 28:
+                return
+            src_port = struct.unpack('!H', ip_header[20:22])[0]
+            dst_port = struct.unpack('!H', ip_header[22:24])[0]
+            self._count_port(src_port)
+            self._count_port(dst_port)
+    
+    def _count_port(self, port):
+        """统计端口流量"""
+        if port in self.ports:
+            with self.lock:
+                self.packet_counts[port] = self.packet_counts.get(port, 0) + 1
+    
+    def get_count(self, port):
+        """获取指定端口的包计数"""
+        with self.lock:
+            return self.packet_counts.get(port, 0)
+    
+    def reset_count(self, port):
+        """重置包计数"""
+        with self.lock:
+            self.packet_counts[port] = 0
+
+
+# 全局包计数器
+packet_counter = None
+
+def init_packet_counter():
+    """根据配置初始化包计数器"""
+    global packet_counter
+    if packet_counter:
+        packet_counter.stop()
+    
+    all_ports = set()
+    for cfg in MONITORED_CONTAINERS.values():
+        for port_info in cfg.get("ports", []):
+            all_ports.add(int(port_info.get("port", 0)))
+    
+    if not all_ports:
+        return
+    
+    packet_counter = PacketCounter(NETWORK_INTERFACE, all_ports)
+    packet_counter.start()
+
 
 # ========== 登录认证 ==========
 
@@ -215,7 +411,28 @@ def get_connection_count(port, proto="tcp"):
         return 0
 
 def has_new_connection(container_name, ports):
-    """检查是否有新的连接（NEW 状态）"""
+    """检查是否有流量（使用 AF_PACKET 包嗅探）"""
+    global packet_counter
+    if packet_counter is None:
+        # 回退到 conntrack
+        return _has_new_connection_conntrack(container_name, ports)
+    
+    try:
+        for port_info in ports:
+            port = int(port_info.get("port", 0))
+            if port in packet_counter.ports:
+                count = packet_counter.get_count(port)
+                if count > 0:
+                    log.info(f"[{container_name}] 检测到流量 (port={port}, packets={count})")
+                    packet_counter.reset_count(port)
+                    return True
+        return False
+    except Exception as e:
+        log.debug(f"[{container_name}] 检查流量失败: {e}")
+        return False
+
+def _has_new_connection_conntrack(container_name, ports):
+    """备用：通过 conntrack 检测新连接"""
     try:
         for port_info in ports:
             port = port_info.get("port", 80)
@@ -641,13 +858,17 @@ def api_i18n(lang):
 
 # ========== 启动 ==========
 
+# 模块加载时初始化（Flask 以模块方式运行时 __name__ != "__main__"）
+monitor.update_config(MONITORED_CONTAINERS)
+init_packet_counter()
+
+t = threading.Thread(target=monitor_loop, daemon=True)
+t.start()
+
+log.info(f"Docker Pause Manager 启动完成，监听 http://{LISTEN_HOST}:{LISTEN_PORT}")
+log.info(f"监控 {len(MONITORED_CONTAINERS)} 个容器，空闲超时 {DEFAULT_IDLE_TIMEOUT}s，检查间隔 {CHECK_INTERVAL}s")
+if packet_counter:
+    log.info(f"AF_PACKET 包嗅探已启动，监听端口 {sorted(packet_counter.ports)}，接口 {NETWORK_INTERFACE}")
+
 if __name__ == "__main__":
-    monitor.update_config(MONITORED_CONTAINERS)
-
-    t = threading.Thread(target=monitor_loop, daemon=True)
-    t.start()
-
-    log.info(f"Docker Pause Manager 启动完成，监听 http://{LISTEN_HOST}:{LISTEN_PORT}")
-    log.info(f"监控 {len(MONITORED_CONTAINERS)} 个容器，空闲超时 {DEFAULT_IDLE_TIMEOUT}s，检查间隔 {CHECK_INTERVAL}s")
-
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False)
