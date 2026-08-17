@@ -1,6 +1,5 @@
 services:
   docker-pause-manager:
-    build: .
     image: ghcr.io/jiushizhu2024/docker-pause-manager:latest
     container_name: docker-pause-manager
     restart: unless-stopped
