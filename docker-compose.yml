@@ -13,5 +13,3 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    ports:
-      - "192.168.10.5:5287:5287"
