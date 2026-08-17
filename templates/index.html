@@ -684,13 +684,22 @@
             document.getElementById('add-modal').classList.add('active');
             const sel = document.getElementById('select-container');
             sel.innerHTML = '<option value="">-- 选择容器 --</option>';
-            
+
             try {
                 const containers = await api('/api/containers');
-                containers.filter(c => !c.monitored).forEach(c => {
+                console.log('Containers API response:', containers);
+                const unmonitored = containers.filter(c => !c.monitored);
+                console.log('Unmonitored containers:', unmonitored.length);
+                unmonitored.forEach(c => {
                     sel.innerHTML += `<option value="${c.name}">${c.name} (${c.status})</option>`;
                 });
-            } catch(e) { console.error(e); }
+                if (unmonitored.length === 0) {
+                    sel.innerHTML = '<option value="">暂无可用容器</option>';
+                }
+            } catch(e) {
+                console.error('Failed to load containers:', e);
+                sel.innerHTML = '<option value="">加载失败</option>';
+            }
             loadContainerPorts();
         }
         
