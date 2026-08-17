@@ -4,13 +4,18 @@ services:
     image: ghcr.io/jiushizhu2024/docker-pause-manager:latest
     container_name: docker-pause-manager
     restart: unless-stopped
-    ports:
-      - "5287:5287"
+    network_mode: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./app.py:/app/app.py
+      - ./config.json:/app/config.json
+      - ./state.json:/app/state.json
+      - ./templates:/app/templates
     environment:
       - CONFIG_PATH=/app/config.json
       - STATE_PATH=/app/state.json
     cap_add:
       - NET_ADMIN
       - NET_RAW
+    ports:
+      - "5287:5287"

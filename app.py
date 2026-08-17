@@ -1,500 +1,650 @@
 #!/usr/bin/env python3
-"""Docker Pause Manager - 容器自动休眠/唤醒系统 v3 (AF_PACKET 检测)"""
-import json, os, time, threading, subprocess, logging, hashlib, hmac, struct, socket
+"""
+Docker Pause Manager - Web UI
+自动 pause/unpause Docker 容器，基于 conntrack NEW 连接检测唤醒，空闲超时 pause。
+支持多端口容器：一个容器可监控多个 TCP/UDP 端口，任一端口有连接即唤醒，全部端口空闲才 pause。
+支持管理员登录认证、自动端口选择。
+"""
+import json, os, time, threading, subprocess, logging, hashlib, secrets
 from functools import wraps
-from flask import Flask, request, jsonify, render_template, make_response, redirect
+from flask import Flask, request, jsonify, send_file, make_response
 
-# ===== Config =====
+# ===== Docker SDK 兼容性修复 =====
+# 使用 requests-unixsocket2 替代 docker SDK 自带适配器
+import requests_unixsocket as _rus
+import requests as _req
+
+# 创建 Unix socket 会话
+_unix_session = _rus.Session()
+DOCKER_SOCKET = "unix://%2Fvar%2Frun%2Fdocker.sock"
+
+def _docker_api(method, path, **kwargs):
+    """直接调用 Docker API（通过 Unix socket）"""
+    url = f"http+unix://%2Fvar%2Frun%2Fdocker.sock{path}"
+    r = _unix_session.request(method, url, **kwargs)
+    if r.status_code == 204:
+        return None
+    if r.status_code >= 400:
+        raise Exception(f"Docker API error {r.status_code}: {r.text}")
+    return r.json()
+
+def _docker_api_stream(method, path, **kwargs):
+    """流式调用 Docker API"""
+    url = f"http+unix://%2Fvar%2Frun%2Fdocker.sock{path}"
+    return _unix_session.request(method, url, stream=True, **kwargs)
+
+# ===== Docker 容器操作封装 =====
+
+class DockerContainer:
+    def __init__(self, container_id, name, status):
+        self.id = container_id
+        self.short_id = container_id[:12]
+        self.name = name
+        self.status = status
+        self._attrs = {}
+
+    def pause(self):
+        _docker_api("POST", f"/containers/{self.id}/pause")
+
+    def unpause(self):
+        _docker_api("POST", f"/containers/{self.id}/unpause")
+
+    def start(self):
+        _docker_api("POST", f"/containers/{self.id}/start")
+
+def get_container(container_name):
+    """获取容器信息"""
+    try:
+        data = _docker_api("GET", f"/containers/{container_name}/json")
+        return DockerContainer(
+            data["Id"],
+            data["Name"].lstrip("/"),
+            data["State"]["Status"]
+        )
+    except Exception:
+        return None
+
+def pause_container(container_name):
+    """暂停容器"""
+    container = get_container(container_name)
+    if container and container.status == "running":
+        try:
+            container.pause()
+            log.info(f"[{container_name}] 已暂停 (pause)")
+            return True
+        except Exception as e:
+            log.error(f"[{container_name}] 暂停失败: {e}")
+            return False
+    return False
+
+def unpause_container(container_name):
+    """恢复容器"""
+    container = get_container(container_name)
+    if container and container.status == "paused":
+        try:
+            container.unpause()
+            log.info(f"[{container_name}] 已唤醒 (unpause)")
+            return True
+        except Exception as e:
+            log.error(f"[{container_name}] 唤醒失败: {e}")
+            return False
+    return False
+
+def start_container(container_name):
+    """启动已退出的容器（重启后恢复）"""
+    container = get_container(container_name)
+    if container and container.status == "exited":
+        try:
+            container.start()
+            log.info(f"[{container_name}] 已启动 (start)")
+            return True
+        except Exception as e:
+            log.error(f"[{container_name}] 启动失败: {e}")
+            return False
+    return False
+
+def get_container_state(container_name):
+    """获取容器状态信息"""
+    container = get_container(container_name)
+    if not container:
+        return {"status": "not_found", "name": container_name}
+    return {
+        "name": container.name,
+        "status": container.status,
+        "id": container.short_id,
+    }
+
+try:
+    import jwt
+except ImportError:
+    jwt = None
+
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/app/config.json")
-STATE_PATH  = os.environ.get("STATE_PATH", "/app/state.json")
-LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
-LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "5287"))
+STATE_PATH = os.environ.get("STATE_PATH", "/app/state.json")
 
+# 默认配置
 DEFAULT_CONFIG = {
     "admin_password": "admin123",
-    "global_idle_timeout": 300,
+    "idle_timeout": 300,
     "check_interval": 10,
-    "net_interface": "eth0",
-    "containers": {},
-    "theme": "light",
-    "language": "zh-CN"
+    "containers": {}
 }
 
+LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
+LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "5287"))
+JWT_SECRET = secrets.token_hex(32)
+JWT_ALGORITHM = "HS256"
+JWT_EXP_HOURS = 24
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("dpm")
+log = logging.getLogger("pause-manager")
 
-def _ensure_file(path, default):
-    if os.path.isdir(path): return
+# ===== 启动时确保配置文件存在 =====
+def ensure_config_file(path, default_content):
+    """确保配置文件存在，不存在则创建默认内容"""
     if not os.path.exists(path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f: json.dump(default, f, ensure_ascii=False, indent=2)
+        log.info(f"[startup] {path} 不存在，正在创建默认配置...")
+        dir_name = os.path.dirname(path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(default_content, f, ensure_ascii=False, indent=2)
+        log.info(f"[startup] {path} 默认配置已创建")
 
-_ensure_file(CONFIG_PATH, DEFAULT_CONFIG)
-_ensure_file(STATE_PATH, {})
+ensure_config_file(CONFIG_PATH, DEFAULT_CONFIG)
+ensure_config_file(STATE_PATH, {})
 
+app = Flask(__name__, static_folder=None)
+
+# 读取配置
 def load_config():
-    try:
-        with open(CONFIG_PATH) as f: return json.load(f)
-    except: return dict(DEFAULT_CONFIG)
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
-def save_config(cfg):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+CONFIG = load_config()
 
-def load_state():
-    try:
-        with open(STATE_PATH) as f: return json.load(f)
-    except: return {}
+# 管理员密码
+ADMIN_PASSWORD = CONFIG.get("admin_password", "admin123")
 
-def save_state(st):
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(st, f, ensure_ascii=False, indent=2)
+# 连续空闲超时（秒），默认 5 分钟
+DEFAULT_IDLE_TIMEOUT = CONFIG.get("idle_timeout", 300)
 
-CFG = load_config()
-ADMIN_PASSWORD = CFG.get("admin_password", "admin123")
-GLOBAL_IDLE = CFG.get("global_idle_timeout", 300)
-CHECK_INTERVAL = CFG.get("check_interval", 10)
-MONITORED = CFG.get("containers", {})
-THEME = CFG.get("theme", "light")
-LANG = CFG.get("language", "zh-CN")
-NET_IFACE = CFG.get("net_interface", "eth0")
+# 轮询间隔（秒）
+CHECK_INTERVAL = CONFIG.get("check_interval", 10)
 
-app = Flask(__name__, template_folder="templates")
+# 监控的容器列表
+MONITORED_CONTAINERS = CONFIG.get("containers", {})
 
-# ===== Token Auth =====
-def make_token(pwd, expiry=3600):
-    ts = int(time.time()) + expiry
-    sig = hmac.new(pwd.encode(), str(ts).encode(), hashlib.sha256).hexdigest()
-    return f"{ts}.{sig}"
+# ========== 登录认证 ==========
 
 def verify_token(token):
-    try:
-        ts, sig = token.split(".", 1)
-        expected = hmac.new(ADMIN_PASSWORD.encode(), ts.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected): return False
-        if int(ts) < time.time(): return False
-        return True
-    except: return False
+    """验证 token - 使用 SHA256 token"""
+    return token == hashlib.sha256(f"dpm-{ADMIN_PASSWORD}".encode()).hexdigest()
 
 def require_auth(f):
     @wraps(f)
-    def decorated(*a, **kw):
-        token = request.headers.get("Authorization", "").replace("Bearer ", "")
-        if not token: token = request.args.get("token", "")
-        if not token: token = request.cookies.get("dpm_token", "")
+    def decorated(*args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+        else:
+            token = request.args.get("token", "")
         if not verify_token(token):
-            if request.is_json or request.path.startswith("/api/"):
-                return jsonify({"error": "unauthorized"}), 401
-            return redirect("/")
-        return f(*a, **kw)
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
     return decorated
 
-# ===== Docker API =====
-import requests_unixsocket as _rus
-_unix_session = _rus.Session()
-DOCKER_SOCK = "http+unix://%2Fvar%2Frun%2Fdocker.sock"
+# ========== conntrack 监控 ==========
 
-def _docker(method, path, **kw):
-    r = _unix_session.request(method, f"{DOCKER_SOCK}{path}", **kw)
-    if r.status_code == 204: return None
-    if r.status_code >= 400: raise Exception(f"Docker API {r.status_code}: {r.text[:200]}")
-    return r.json()
-
-def get_container(name):
+def get_connection_count(port, proto="tcp"):
+    """通过 conntrack 统计指定端口的连接数"""
     try:
-        info = _docker("GET", f"/containers/{name}/json")
-        state = info.get("State", {})
-        ports = info.get("Ports", [])
-        port_map = {p["PrivatePort"]: p.get("PublicPort", "") for p in ports}
-        return {"id": info.get("Id", "")[:12], "name": info.get("Names", [""])[0].lstrip("/"),
-                "image": info.get("Image", ""), "status": state.get("Status", ""),
-                "ports": port_map}
-    except: return None
+        result = subprocess.run(
+            ["conntrack", "-L", "-p", proto, "-d", f":{port}"],
+            capture_output=True, text=True, timeout=5
+        )
+        lines = result.stdout.strip().split("\n")
+        established = 0
+        for line in lines:
+            if "ESTABLISHED" in line or "ASSURED" in line:
+                established += 1
+        return established
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return 0
 
-def list_containers():
+def has_new_connection(container_name, ports):
+    """检查是否有新的连接（NEW 状态）"""
     try:
-        containers = _docker("GET", "/containers/json", params={"all": True})
-        return [{"id": c["Id"][:12], "name": c["Names"][0].lstrip("/"),
-                 "image": c["Image"], "status": c["States"],
-                 "ports": {p["PrivatePort"]: p.get("PublicPort", "") for p in c.get("Ports", [])}}
-                for c in containers]
-    except: return []
+        for port_info in ports:
+            port = port_info.get("port", 80)
+            proto = port_info.get("proto", "tcp")
+            result = subprocess.run(
+                ["conntrack", "-L", "-p", proto, "--state", "NEW", "-d", f":{port}"],
+                capture_output=True, text=True, timeout=5
+            )
+            lines = result.stdout.strip().split("\n")
+            if lines and lines[0]:
+                if any("NEW" in line for line in lines):
+                    log.info(f"[{container_name}] 检测到新连接 (port={port}/{proto})")
+                    return True
+        return False
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
 
-def pause_container(name):
-    try:
-        _docker("POST", f"/containers/{name}/pause")
-        log.info(f"[{name}] paused"); return True
-    except Exception as e:
-        log.warning(f"[{name}] pause failed: {e}"); return False
+# ========== 容器监控循环 ==========
 
-def unpause_container(name):
-    try:
-        _docker("POST", f"/containers/{name}/unpause")
-        log.info(f"[{name}] unpaused"); return True
-    except Exception as e:
-        log.warning(f"[{name}] unpause failed: {e}"); return False
-
-def stop_container(name):
-    try:
-        _docker("POST", f"/containers/{name}/stop", params={"t": "5"})
-        log.info(f"[{name}] stopped"); return True
-    except Exception as e:
-        log.warning(f"[{name}] stop failed: {e}"); return False
-
-def start_container(name):
-    try:
-        _docker("POST", f"/containers/{name}/start")
-        log.info(f"[{name}] started"); return True
-    except Exception as e:
-        log.warning(f"[{name}] start failed: {e}"); return False
-
-# ===== AF_PACKET 包计数器 (Lazytainer 风格) =====
-class PacketCounter:
-    """使用 AF_PACKET raw socket 持续监听网卡上发往指定端口的数据包，
-       维护滑动窗口历史，检测空闲/活动。"""
+class ContainerMonitor:
     def __init__(self):
-        self.socks = {}       # name -> {sock, ports, rx_count}
-        self.lock = threading.Lock()
-        self.rx_history = {}  # name -> [count, ...]
-        self.running = True
-
-    def _start_sock(self, name, ports):
-        """启动 AF_PACKET socket 并开始抓包"""
-        tcp_ports = [p.get("port", 80) for p in ports if p.get("proto", "tcp") in ("tcp", "TCP")]
-        udp_ports = [p.get("port", 80) for p in ports if p.get("proto", "udp") in ("udp", "UDP")]
-        all_ports = list(set(tcp_ports + udp_ports))
-        if not all_ports: return
-        try:
-            sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
-            try:
-                sock.bind((NET_IFACE, socket.ntohs(0x0003)))
-            except OSError:
-                pass  # 绑定接口失败，仍用默认
-            sock.settimeout(0.5)
-            self.socks[name] = {"sock": sock, "ports": all_ports, "rx_count": 0}
-            t = threading.Thread(target=self._rx_loop, args=(name,), daemon=True)
-            t.start()
-            log.info(f"[{name}] packet counter started, monitoring ports {all_ports}")
-        except Exception as e:
-            log.warning(f"[{name}] packet counter start failed: {e}")
-
-    def _rx_loop(self, name):
-        """持续接收并计数"""
-        while self.running and name in self.socks:
-            try:
-                info = self.socks.get(name)
-                if not info: return
-                data = info["sock"].recvfrom(65535)[0]
-                if len(data) < 34: continue
-                ip_header = data[14:34]
-                ihl = (ip_header[0] & 0xF) * 4
-                if ihl < 20 or len(data) < 14 + ihl + 8: continue
-                proto = ip_header[9]
-                if proto == 6:   # TCP
-                    tcp_h = data[14+ihl:14+ihl+20]
-                    dst_port = struct.unpack('>H', tcp_h[2:4])[0]
-                elif proto == 17:  # UDP
-                    udp_h = data[14+ihl:14+ihl+8]
-                    dst_port = struct.unpack('>H', udp_h[2:4])[0]
-                else:
-                    continue
-                if dst_port in info.get("ports", []):
-                    info["rx_count"] += 1
-            except socket.timeout:
-                continue
-            except Exception:
-                return
-
-    def register(self, name, ports):
-        with self.lock:
-            if name in self.socks:
-                self._stop_sock(name)
-            self._start_sock(name, ports)
-            self.rx_history[name] = [0] * 3
-
-    def unregister(self, name):
-        with self.lock:
-            self._stop_sock(name)
-            self.rx_history.pop(name, None)
-
-    def _stop_sock(self, name):
-        info = self.socks.get(name)
-        if info:
-            try: info["sock"].close()
-            except: pass
-            self.socks.pop(name, None)
-
-    def record(self, name):
-        """将当前包数追加到历史窗口"""
-        with self.lock:
-            cur = self.socks.get(name, {}).get("rx_count", 0)
-            hist = self.rx_history.get(name, [0])
-            self.rx_history[name] = [hist[-1]] + [cur]
-
-    def is_idle(self, name, threshold=10):
-        """滑动窗口内包数变化 < threshold = 空闲"""
-        with self.lock:
-            hist = self.rx_history.get(name)
-            if not hist or len(hist) < 2: return True
-            diff = hist[-1] - hist[0]
-            return diff < threshold
-
-    def shutdown(self):
-        self.running = False
-        with self.lock:
-            for name in list(self.socks.keys()):
-                self._stop_sock(name)
-
-packet_counter = PacketCounter()
-
-
-# ===== Monitor =====
-class Monitor:
-    def __init__(self):
-        self.states = {}
+        self.container_states = {}
         self.lock = threading.Lock()
         self.running = True
-        self._restore_state()
-
-    def _restore_state(self):
-        st = load_state()
-        for name, info in st.items():
-            cfg = MONITORED.get(name)
-            if not cfg: continue
-            real = get_container(name)
-            real_paused = real and real["status"] in ("paused", "exited")
-            restored_by_us = info.get("is_paused_by_us", False) and real_paused
-            self.states[name] = {"idle_seconds": 0, "is_paused": real_paused,
-                                 "is_paused_by_us": restored_by_us,
-                                 "ports": cfg.get("ports", [])}
-            packet_counter.register(name, self.states[name]["ports"])
-
-    def update_config(self, containers):
-        with self.lock:
-            for name in list(self.states.keys()):
-                if name not in containers:
-                    del self.states[name]
-                    packet_counter.unregister(name)
-            for name, cfg in containers.items():
-                if name not in self.states:
-                    self.states[name] = {"idle_seconds": 0, "is_paused": False,
-                                         "is_paused_by_us": False, "ports": cfg.get("ports", [])}
-                    packet_counter.register(name, self.states[name]["ports"])
-                else:
-                    old = self.states[name].get("ports", [])
-                    new = cfg.get("ports", [])
-                    if old != new:
-                        self.states[name]["ports"] = new
-                        packet_counter.register(name, new)
+        self._load_state()
 
     def _save_state(self):
-        st = {}
-        for name, s in self.states.items():
-            st[name] = {"is_paused_by_us": s.get("is_paused_by_us", False)}
-        save_state(st)
-
-    def get_status(self, name):
-        c = get_container(name)
-        if not c: return {"name": name, "status": "not_found", "idle_seconds": 0, "is_paused_by_us": False}
-        with self.lock:
-            s = self.states.get(name, {})
-            return {"name": name, "status": c["status"], "idle_seconds": s.get("idle_seconds", 0),
+        """持久化状态，重启后恢复 paused-by-us 标记"""
+        try:
+            state = {}
+            for name, s in self.container_states.items():
+                state[name] = {
                     "is_paused_by_us": s.get("is_paused_by_us", False),
-                    "image": c["image"], "ports": c["ports"]}
+                    "restored_from_reboot": False,
+                }
+            state_dir = os.path.dirname(STATE_PATH)
+            if state_dir:
+                os.makedirs(state_dir, exist_ok=True)
+            with open(STATE_PATH, "w") as f:
+                json.dump(state, f)
+        except Exception as e:
+            log.warning(f"保存状态失败: {e}")
 
-    def get_all_status(self):
-        result = []
-        for name in MONITORED:
-            c = get_container(name)
-            if not c: continue
-            with self.lock:
-                s = self.states.get(name, {})
-            result.append({"name": name, "status": c["status"],
-                           "idle_seconds": s.get("idle_seconds", 0),
-                           "is_paused_by_us": s.get("is_paused_by_us", False),
-                           "image": c["image"], "ports": c["ports"]})
-        paused = sum(1 for r in result if r["status"] == "paused")
-        running = sum(1 for r in result if r["status"] == "running")
-        return {"containers": result, "paused": paused, "running": running, "total": len(result)}
+    def _load_state(self):
+        """启动时恢复状态"""
+        try:
+            if os.path.exists(STATE_PATH):
+                with open(STATE_PATH, "r") as f:
+                    return json.load(f)
+        except Exception as e:
+            log.warning(f"加载状态失败: {e}")
+        return {}
 
-monitor = Monitor()
+    def update_config(self, containers_cfg):
+        with self.lock:
+            saved_state = self._load_state()
+            for name, cfg in containers_cfg.items():
+                prev = saved_state.get(name, {})
+                was_paused_by_us = prev.get("is_paused_by_us", False)
+                if name not in self.container_states:
+                    self.container_states[name] = {
+                        "idle_seconds": 0,
+                        "is_paused_by_us": was_paused_by_us,
+                        "ports": cfg.get("ports", []),
+                        "idle_timeout": cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT),
+                    }
+            for name in list(self.container_states.keys()):
+                if name not in containers_cfg:
+                    del self.container_states[name]
+
+    def mark_activity(self, container_name):
+        with self.lock:
+            if container_name in self.container_states:
+                self.container_states[container_name]["idle_seconds"] = 0
+
+    def run_check(self):
+        with self.lock:
+            needs_save = False
+            for name, state in self.container_states.items():
+                ports = state["ports"]
+                idle_timeout = state["idle_timeout"]
+
+                container = get_container(name)
+                if not container:
+                    continue
+
+                # 重启后恢复：之前被 pause 的容器重启后变成 exited
+                if container.status == "exited" and state["is_paused_by_us"]:
+                    log.info(f"[{name}] 重启后恢复中 (exited→starting)")
+                    start_container(name)
+                    state["is_paused_by_us"] = False
+                    state["idle_seconds"] = 0
+                    needs_save = True
+                    continue
+
+                if container.status == "paused" and not state["is_paused_by_us"]:
+                    state["is_paused_by_us"] = True
+                    state["idle_seconds"] = 0
+                    needs_save = True
+                    continue
+
+                if container.status == "paused" and state["is_paused_by_us"]:
+                    if has_new_connection(name, ports):
+                        unpause_container(name)
+                        state["idle_seconds"] = 0
+                        state["is_paused_by_us"] = False
+                        needs_save = True
+                    continue
+
+                if container.status == "running":
+                    has_active = False
+                    for port_info in ports:
+                        port = port_info.get("port", 80)
+                        proto = port_info.get("proto", "tcp")
+                        count = get_connection_count(port, proto)
+                        if count > 0:
+                            has_active = True
+                            break
+
+                    if has_active:
+                        state["idle_seconds"] = 0
+                    else:
+                        state["idle_seconds"] += CHECK_INTERVAL
+                        log.debug(f"[{name}] 空闲中 {state['idle_seconds']}s / {idle_timeout}s")
+                        if state["idle_seconds"] >= idle_timeout:
+                            pause_container(name)
+                            state["is_paused_by_us"] = True
+                            needs_save = True
+            if needs_save:
+                self._save_state()
+
+monitor = ContainerMonitor()
 
 def monitor_loop():
     while monitor.running:
         try:
-            time.sleep(CHECK_INTERVAL)
-            if not monitor.running: break
-            with monitor.lock:
-                for name, s in list(monitor.states.items()):
-                    cfg = MONITORED.get(name)
-                    if not cfg: continue
-                    idle_timeout = cfg.get("idle_timeout", GLOBAL_IDLE)
-                    sleep_mode = cfg.get("sleep_mode", "pause")
-                    threshold = cfg.get("min_packet_threshold", 10)
-                    ports = s.get("ports", [])
-
-                    c = get_container(name)
-                    if not c: continue
-
-                    packet_counter.record(name)
-
-                    if c["status"] == "running":
-                        if packet_counter.is_idle(name, threshold):
-                            s["idle_seconds"] = s.get("idle_seconds", 0) + CHECK_INTERVAL
-                            if s["idle_seconds"] >= idle_timeout:
-                                log.info(f"[{name}] idle {s['idle_seconds']}s >= {idle_timeout}s, {sleep_mode}ing")
-                                ok = pause_container(name) if sleep_mode == "pause" else stop_container(name)
-                                if ok:
-                                    s["is_paused"] = True
-                                    s["is_paused_by_us"] = True
-                                    s["idle_seconds"] = 0
-                                    monitor._save_state()
-                        else:
-                            s["idle_seconds"] = 0
-
-                    elif c["status"] == "paused" and s.get("is_paused_by_us"):
-                        if not packet_counter.is_idle(name, threshold):
-                            log.info(f"[{name}] activity detected (packets > {threshold}), unpausing")
-                            ok = unpause_container(name)
-                            if ok:
-                                s["is_paused"] = False
-                                s["is_paused_by_us"] = False
-                                s["idle_seconds"] = 0
-                                monitor._save_state()
-                    elif c["status"] == "exited" and s.get("is_paused_by_us"):
-                        if not packet_counter.is_idle(name, threshold):
-                            log.info(f"[{name}] activity detected, starting")
-                            ok = start_container(name)
-                            if ok:
-                                s["is_paused"] = False
-                                s["is_paused_by_us"] = False
-                                s["idle_seconds"] = 0
-                                monitor._save_state()
+            monitor.run_check()
         except Exception as e:
-            log.warning(f"Monitor error: {e}")
+            log.error(f"监控循环异常: {e}")
+        time.sleep(CHECK_INTERVAL)
 
+# ========== Web API ==========
 
-# ===== API Routes =====
 @app.route("/")
 def index():
-    token = request.args.get("token", "")
-    if not verify_token(token): return redirect("/")
-    return render_template("index.html", token=token, theme=THEME, lang=LANG)
-
-@app.route("/api/login", methods=["POST"])
-def login():
-    data = request.get_json(silent=True) or {}
-    pwd = data.get("password", "")
-    if pwd == ADMIN_PASSWORD:
-        token = make_token(ADMIN_PASSWORD)
-        resp = jsonify({"success": True, "token": token})
-        resp.set_cookie("dpm_token", token, max_age=3600)
-        return resp
-    return jsonify({"success": False, "error": "密码错误"}), 401
-
-@app.route("/api/logout", methods=["POST"])
-def logout():
-    resp = make_response(jsonify({"success": True}))
-    resp.delete_cookie("dpm_token")
+    resp = make_response("""
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
+        <title>Docker Pause Manager</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: #f1f5f9; color: #1e293b; padding: 20px;
+            }
+            .container { max-width: 900px; margin: 0 auto; }
+            h1 { font-size: 24px; margin-bottom: 20px; color: #0f172a; }
+            .card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+            .card h2 { font-size: 18px; margin-bottom: 12px; }
+            .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 600; }
+            .status-running { background: #dcfce7; color: #166534; }
+            .status-paused { background: #fef3c7; color: #92400e; }
+            .status-exited { background: #fce4ec; color: #c62828; }
+            .status-not_found { background: #f1f5f9; color: #64748b; }
+            .btn { display: inline-block; padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; transition: background 0.2s; }
+            .btn-primary { background: #2563eb; color: #fff; }
+            .btn-primary:hover { background: #1d4ed8; }
+            .btn-success { background: #16a34a; color: #fff; }
+            .btn-success:hover { background: #15803d; }
+            .btn-warning { background: #d97706; color: #fff; }
+            .btn-warning:hover { background: #b45309; }
+            .login-form { margin-bottom: 20px; }
+            .login-form input { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; }
+            .login-form input:focus { outline: none; border-color: #2563eb; }
+            .login-form button { margin-left: 8px; }
+            .hidden { display: none; }
+            table { width: 100%; border-collapse: collapse; font-size: 14px; }
+            th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e2e8f0; }
+            th { color: #64748b; font-weight: 600; }
+            .stats { display: flex; gap: 16px; margin-bottom: 16px; }
+            .stat-box { flex: 1; background: #fff; padding: 16px; border-radius: 12px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+            .stat-box .num { font-size: 28px; font-weight: 700; }
+            .stat-box .label { font-size: 13px; color: #64748b; }
+            .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: #fff; font-size: 14px; z-index: 999; display: none; }
+            .toast-success { background: #16a34a; }
+            .toast-error { background: #dc2626; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🐳 Docker Pause Manager</h1>
+            <div class="login-form" id="loginForm">
+                <form onsubmit="event.preventDefault(); login();">
+                    <input type="password" id="password" placeholder="管理员密码" />
+                    <button class="btn btn-primary" type="submit">登录</button>
+                </form>
+            </div>
+            <div id="mainContent" class="hidden">
+                <div class="stats" id="stats"></div>
+                <div class="card">
+                    <h2>容器状态</h2>
+                    <div id="containerList"></div>
+                </div>
+                <div class="card">
+                    <h2>配置</h2>
+                    <p style="font-size:14px;color:#64748b;margin-bottom:12px;">
+                        在 <code>config.json</code> 中配置监控的容器，或通过 API 动态管理。
+                    </p>
+                    <button class="btn btn-primary" onclick="refreshStatus()">刷新状态</button>
+                </div>
+            </div>
+        </div>
+        <div id="toast" class="toast"></div>
+        <script>
+            let token = '';
+            function showToast(msg, type='success') {
+                const t = document.getElementById('toast');
+                t.textContent = msg; t.className = 'toast toast-' + type; t.style.display = 'block';
+                setTimeout(() => t.style.display = 'none', 3000);
+            }
+            function login() {
+                const pwd = document.getElementById('password').value;
+                console.log('登录中...', pwd ? '密码已输入' : '密码为空');
+                fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({password: pwd})
+                }).then(r => {
+                    if (!r.ok) { showToast('密码错误', 'error'); return; }
+                    return r.json();
+                }).then(data => {
+                    if (!data) return;
+                    token = data.token;
+                    document.getElementById('loginForm').style.display = 'none';
+                    document.getElementById('mainContent').classList.remove('hidden');
+                    refreshStatus();
+                }).catch(e => {
+                    console.error('登录失败:', e);
+                    showToast('登录失败: ' + e.message, 'error');
+                });
+            }
+            async function apiCall(path, method='GET', body=null) {
+                const opts = { method, headers: { 'Authorization': 'Bearer ' + token } };
+                if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+                const r = await fetch(path, opts);
+                if (!r.ok) { showToast('API 错误: ' + r.status, 'error'); return null; }
+                return r.json();
+            }
+            async function refreshStatus() {
+                const data = await apiCall('/api/status');
+                if (!data) return;
+                document.getElementById('stats').innerHTML =
+                    '<div class="stat-box"><div class="num">'+data.total+'</div><div class="label">总计</div></div>'
+                    + '<div class="stat-box"><div class="num">'+data.running+'</div><div class="label">运行中</div></div>'
+                    + '<div class="stat-box"><div class="num">'+data.paused+'</div><div class="label">已暂停</div></div>';
+                let html = '<table><tr><th>容器名</th><th>状态</th><th>空闲时间</th><th>操作</th></tr>';
+                for (const c of data.containers) {
+                    html += '<tr><td><strong>'+c.name+'</strong></td>'
+                        + '<td><span class="status-badge status-'+c.status.replace(' ','_')+'">'+c.status+'</span></td>'
+                        + '<td style="color:#64748b;font-size:13px;">'+c.idle_seconds+'s</td><td>';
+                    if (c.status === 'paused') html += '<button class="btn btn-success" onclick="unpause(\''+c.name+'\')">唤醒</button>';
+                    else if (c.status === 'running') html += '<button class="btn btn-warning" onclick="pause(\''+c.name+'\')">暂停</button>';
+                    html += '</td></tr>';
+                }
+                html += '</table>';
+                document.getElementById('containerList').innerHTML = html;
+            }
+            async function pause(name) { await apiCall('/api/pause/'+name, 'POST'); refreshStatus(); }
+            async function unpause(name) { await apiCall('/api/unpause/'+name, 'POST'); refreshStatus(); }
+        </script>
+    </body>
+    </html>
+    """)
     return resp
 
-@app.route("/api/containers")
-def api_containers():
-    data = []
-    for c in list_containers():
-        data.append({"id": c["id"], "name": c["name"], "image": c["image"],
-                     "status": c["status"], "ports": [{"port": int(k), "proto": "tcp"} for k in c.get("ports", {})]})
-    return jsonify({"containers": data})
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    """登录接口，验证密码并返回 token"""
+    data = request.get_json()
+    if not data or data.get("password") != ADMIN_PASSWORD:
+        return jsonify({"error": "密码错误"}), 401
+    token = hashlib.sha256(f"dpm-{ADMIN_PASSWORD}".encode()).hexdigest()
+    return jsonify({"token": token, "success": True})
 
 @app.route("/api/status")
+@require_auth
 def api_status():
-    return jsonify(monitor.get_all_status())
+    containers = []
+    total = 0
+    running = 0
+    paused = 0
+    for name, state in monitor.container_states.items():
+        total += 1
+        container_info = get_container_state(name)
+        containers.append({
+            "name": name,
+            "status": container_info["status"],
+            "idle_seconds": state["idle_seconds"],
+            "is_paused_by_us": state["is_paused_by_us"],
+        })
+        if container_info["status"] == "running":
+            running += 1
+        elif container_info["status"] == "paused":
+            paused += 1
+    return jsonify({
+        "total": total,
+        "running": running,
+        "paused": paused,
+        "containers": containers,
+    })
 
-@app.route("/api/config", methods=["GET"])
-def get_config():
-    return jsonify({"admin_password": "******", "global_idle_timeout": GLOBAL_IDLE,
-                    "check_interval": CHECK_INTERVAL, "containers": MONITORED,
-                    "theme": THEME, "language": LANG, "net_interface": NET_IFACE})
-
-@app.route("/api/config", methods=["POST"])
-def save_config_api():
-    data = request.get_json(silent=True) or {}
-    global ADMIN_PASSWORD, GLOBAL_IDLE, CHECK_INTERVAL, MONITORED, THEME, LANG, NET_IFACE
-    if "admin_password" in data and data["admin_password"]:
-        ADMIN_PASSWORD = data["admin_password"]
-    GLOBAL_IDLE = data.get("global_idle_timeout", GLOBAL_IDLE)
-    CHECK_INTERVAL = data.get("check_interval", CHECK_INTERVAL)
-    NET_IFACE = data.get("net_interface", NET_IFACE)
-    THEME = data.get("theme", THEME)
-    LANG = data.get("language", LANG)
-    if "containers" in data:
-        MONITORED = data["containers"]
-        monitor.update_config(MONITORED)
-    save_config({"admin_password": ADMIN_PASSWORD, "global_idle_timeout": GLOBAL_IDLE,
-                 "check_interval": CHECK_INTERVAL, "containers": MONITORED,
-                 "theme": THEME, "language": LANG, "net_interface": NET_IFACE})
-    return jsonify({"success": True})
-
-@app.route("/api/password", methods=["POST"])
-def change_password():
-    global ADMIN_PASSWORD
-    data = request.get_json(silent=True) or {}
-    if data.get("current_password") != ADMIN_PASSWORD:
-        return jsonify({"success": False, "error": "当前密码错误"}), 400
-    new = data.get("new_password")
-    confirm = data.get("confirm_password")
-    if new != confirm:
-        return jsonify({"success": False, "error": "两次密码不一致"}), 400
-    ADMIN_PASSWORD = new
-    save_config({"admin_password": ADMIN_PASSWORD, "global_idle_timeout": GLOBAL_IDLE,
-                 "check_interval": CHECK_INTERVAL, "containers": MONITORED,
-                 "theme": THEME, "language": LANG, "net_interface": NET_IFACE})
-    return jsonify({"success": True})
-
-@app.route("/api/pause/<name>", methods=["POST"])
+@app.route("/api/pause/<container_name>", methods=["POST"])
 @require_auth
-def api_pause(name):
-    cfg = MONITORED.get(name)
-    sleep_mode = cfg.get("sleep_mode", "pause") if cfg else "pause"
-    if sleep_mode == "pause":
-        ok = pause_container(name)
-    else:
-        ok = stop_container(name)
-    with monitor.lock:
-        if name in monitor.states:
-            monitor.states[name]["is_paused"] = True
-            monitor.states[name]["is_paused_by_us"] = True
-            monitor.states[name]["idle_seconds"] = 0
-            monitor._save_state()
-    return jsonify({"success": ok})
+def api_pause(container_name):
+    if pause_container(container_name):
+        monitor.mark_activity(container_name)
+        with monitor.lock:
+            if container_name in monitor.container_states:
+                monitor.container_states[container_name]["is_paused_by_us"] = True
+        monitor._save_state()
+        return jsonify({"success": True, "message": f"容器 {container_name} 已暂停"})
+    return jsonify({"success": False, "message": f"暂停 {container_name} 失败"}), 400
 
-@app.route("/api/unpause/<name>", methods=["POST"])
+@app.route("/api/unpause/<container_name>", methods=["POST"])
 @require_auth
-def api_unpause(name):
-    c = get_container(name)
-    if not c: return jsonify({"success": False, "error": "容器不存在"}), 404
-    if c["status"] == "paused": ok = unpause_container(name)
-    elif c["status"] == "exited": ok = start_container(name)
-    else: ok = True
-    with monitor.lock:
-        if name in monitor.states:
-            monitor.states[name]["is_paused"] = False
-            monitor.states[name]["is_paused_by_us"] = False
-            monitor.states[name]["idle_seconds"] = 0
-            monitor._save_state()
-    return jsonify({"success": ok})
+def api_unpause(container_name):
+    if unpause_container(container_name):
+        monitor.mark_activity(container_name)
+        with monitor.lock:
+            if container_name in monitor.container_states:
+                monitor.container_states[container_name]["is_paused_by_us"] = False
+        monitor._save_state()
+        return jsonify({"success": True, "message": f"容器 {container_name} 已唤醒"})
+    return jsonify({"success": False, "message": f"唤醒 {container_name} 失败"}), 400
 
-@app.route("/api/ping", methods=["GET"])
-def api_ping():
-    return jsonify({"success": True, "time": time.time()})
+@app.route("/api/start/<container_name>", methods=["POST"])
+@require_auth
+def api_start(container_name):
+    if start_container(container_name):
+        monitor.mark_activity(container_name)
+        with monitor.lock:
+            if container_name in monitor.container_states:
+                monitor.container_states[container_name]["is_paused_by_us"] = False
+        monitor._save_state()
+        return jsonify({"success": True, "message": f"容器 {container_name} 已启动"})
+    return jsonify({"success": False, "message": f"启动 {container_name} 失败"}), 400
 
+@app.route("/api/config", methods=["GET", "POST"])
+@require_auth
+def api_config():
+    if request.method == "POST":
+        data = request.get_json()
+        if data and "containers" in data:
+            global CONFIG, MONITORED_CONTAINERS
+            CONFIG["containers"] = data["containers"]
+            MONITORED_CONTAINERS = data["containers"]
+            monitor.update_config(data["containers"])
+            config_dir = os.path.dirname(CONFIG_PATH)
+            if config_dir:
+                os.makedirs(config_dir, exist_ok=True)
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(CONFIG, f, ensure_ascii=False, indent=2)
+            return jsonify({"success": True, "message": "配置已更新"})
+        return jsonify({"success": False, "message": "无效的配置"}), 400
+    return jsonify({
+        "containers": MONITORED_CONTAINERS,
+        "idle_timeout": DEFAULT_IDLE_TIMEOUT,
+        "check_interval": CHECK_INTERVAL,
+    })
 
-# ===== Main =====
-log.info("Starting monitor thread...")
-monitor.update_config(MONITORED)
-t = threading.Thread(target=monitor_loop, daemon=True)
-t.start()
-log.info(f"Docker Pause Manager v3 (AF_PACKET) started on {LISTEN_HOST}:{LISTEN_PORT}")
+@app.route("/api/i18n/<lang>")
+def api_i18n(lang):
+    i18n = {
+        "zh-CN": {
+            "title": "Docker Pause Manager",
+            "login_title": "管理员登录",
+            "password_placeholder": "管理员密码",
+            "login_btn": "登录",
+            "container_status": "容器状态",
+            "config": "配置",
+            "refresh": "刷新状态",
+            "total": "总计",
+            "running": "运行中",
+            "paused": "已暂停",
+            "container_name": "容器名",
+            "status": "状态",
+            "idle_time": "空闲时间",
+            "actions": "操作",
+            "wake": "唤醒",
+            "pause": "暂停",
+            "config_desc": "在 config.json 中配置监控的容器，或通过 API 动态管理。",
+        },
+        "en": {
+            "title": "Docker Pause Manager",
+            "login_title": "Admin Login",
+            "password_placeholder": "Admin Password",
+            "login_btn": "Login",
+            "container_status": "Container Status",
+            "config": "Configuration",
+            "refresh": "Refresh",
+            "total": "Total",
+            "running": "Running",
+            "paused": "Paused",
+            "container_name": "Container",
+            "status": "Status",
+            "idle_time": "Idle Time",
+            "actions": "Actions",
+            "wake": "Wake",
+            "pause": "Pause",
+            "config_desc": "Configure monitored containers in config.json, or manage via API.",
+        },
+    }
+    return jsonify(i18n.get(lang, i18n["en"]))
+
+# ========== 启动 ==========
 
 if __name__ == "__main__":
+    monitor.update_config(MONITORED_CONTAINERS)
+
+    t = threading.Thread(target=monitor_loop, daemon=True)
+    t.start()
+
+    log.info(f"Docker Pause Manager 启动完成，监听 http://{LISTEN_HOST}:{LISTEN_PORT}")
+    log.info(f"监控 {len(MONITORED_CONTAINERS)} 个容器，空闲超时 {DEFAULT_IDLE_TIMEOUT}s，检查间隔 {CHECK_INTERVAL}s")
+
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False)

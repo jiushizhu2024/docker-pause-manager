@@ -1,6 +1,16 @@
 {
   "admin_password": "admin123",
-  "idle_timeout": 300,
+  "global_idle_timeout": 300,
   "check_interval": 10,
-  "containers": {}
+  "net_interface": "eth0",
+  "containers": {
+    "ariang": {
+      "ports": [{"port": 6880, "proto": "tcp"}],
+      "idle_timeout": 30,
+      "sleep_mode": "pause",
+      "min_packet_threshold": 10
+    }
+  },
+  "theme": "light",
+  "language": "zh-CN"
 }
