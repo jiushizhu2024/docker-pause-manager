@@ -7,6 +7,16 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>Docker Pause Manager</title>
+    <script>
+        // Force no cache for this page
+        if (window.location.reload) {
+            window.addEventListener('load', function() {
+                navigator.serviceWorker?.getRegistrations().then(regs => {
+                    regs.forEach(reg => reg.unregister());
+                });
+            });
+        }
+    </script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
