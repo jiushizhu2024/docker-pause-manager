@@ -81,13 +81,9 @@
         {
           "port": 23000,
           "proto": "tcp"
-        },
-        {
-          "port": 3000,
-          "proto": "tcp"
         }
       ],
-      "idle_timeout": 300
+      "idle_timeout": 30
     },
     "omniroute": {
       "ports": [

@@ -475,13 +475,8 @@ def api_list_containers():
     result = []
     for c in containers:
         is_monitored = c["name"] in MONITORED_CONTAINERS
-        # 标准化端口格式
-        ports = []
-        for p in (c.get("ports") or []):
-            ports.append({
-                "port": p.get("PublicPort") or p.get("PrivatePort"),
-                "proto": p.get("Type", "tcp")
-            })
+        # 使用 get_container_ports 获取标准化的端口列表
+        ports = get_container_ports(c["name"])
         result.append({
             "name": c["name"],
             "status": c["status"],
