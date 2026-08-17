@@ -1,31 +1,9 @@
 {
   "admin_password": "admin123",
-  "global_idle_timeout": 300,
+  "idle_timeout": 300,
   "check_interval": 10,
   "net_interface": "eth0",
-  "containers": {
-    "ariang": {
-      "ports": [
-        {
-          "port": 6880,
-          "proto": "tcp"
-        }
-      ],
-      "idle_timeout": 30,
-      "sleep_mode": "pause",
-      "min_packet_threshold": 10
-    },
-    "openlist": {
-      "ports": [
-        {
-          "port": 5300,
-          "proto": "tcp"
-        }
-      ],
-      "idle_timeout": 600
-    }
-  },
   "theme": "light",
   "language": "zh-CN",
-  "idle_timeout": 300
+  "containers": {}
 }

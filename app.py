@@ -534,24 +534,37 @@ def api_add_container():
 @app.route("/api/remove_container", methods=["POST"])
 @token_required
 def api_remove_container():
-    """从监控中移除容器"""
+    """从监控中移除容器，先唤醒再删除"""
     data = request.get_json()
     container_name = data.get("name")
-    
+
     if not container_name:
         return jsonify({"error": "容器名不能为空"}), 400
-    
+
+    # 先唤醒容器（无论当前状态）
+    container = get_container(container_name)
+    if container:
+        if container.status == "paused":
+            unpause_container(container_name)
+            log.info(f"[{container_name}] 删除前已唤醒")
+        elif container.status == "exited":
+            start_container(container_name)
+            log.info(f"[{container_name}] 删除前已启动")
+
+    # 从监控配置中删除
     if container_name in MONITORED_CONTAINERS:
         del MONITORED_CONTAINERS[container_name]
-        if container_name in monitor.container_states:
-            del monitor.container_states[container_name]
-        save_config({"admin_password": ADMIN_PASSWORD, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
-                     "check_interval": CHECK_INTERVAL, "net_interface": NETWORK_INTERFACE,
-                     "theme": CONFIG.get("theme", "light"), "language": CONFIG.get("language", "zh-CN"),
-                     "containers": MONITORED_CONTAINERS})
-        init_packet_counter()
-        log.info(f"[{container_name}] 已从监控中移除")
-    
+    if container_name in monitor.container_states:
+        del monitor.container_states[container_name]
+
+    # 保存配置
+    save_config({"admin_password": ADMIN_PASSWORD, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
+                 "check_interval": CHECK_INTERVAL, "net_interface": NETWORK_INTERFACE,
+                 "theme": CONFIG.get("theme", "light"), "language": CONFIG.get("language", "zh-CN"),
+                 "containers": MONITORED_CONTAINERS})
+    init_packet_counter()
+    log.info(f"[{container_name}] 已从监控中移除")
+
     return jsonify({"success": True})
 
 @app.route("/api/settings", methods=["GET", "PUT"])

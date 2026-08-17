@@ -498,17 +498,18 @@
                 const ports = (c.ports || []).map(p => `<span class="port-tag">${p.port}/${p.proto}</span>`).join('');
                 const btnText = c.status === 'paused' ? (i18nData['unpause'] || 'Unpause') :
                                (i18nData['pause'] || 'Pause');
+                const deleteText = i18nData['remove'] || 'Remove';
                 return `<tr>
                     <td><span class="status-badge ${statusClass}">${statusText}</span></td>
                     <td><strong>${c.name}</strong></td>
                     <td>${ports}</td>
                     <td>${Math.floor(c.idle_seconds / 60)}m ${c.idle_seconds % 60}s / ${c.idle_timeout}s</td>
                     <td class="btn-group">
-                        <button class="btn btn-sm ${c.status === 'paused' ? 'btn-success' : 'btn-warning'}" 
+                        <button class="btn btn-sm ${c.status === 'paused' ? 'btn-success' : 'btn-warning'}"
                             onclick="${c.status === 'paused' ? `unpause('${c.name}')` : `pause('${c.name}')`}">
                             ${btnText}
                         </button>
-                        <button class="btn btn-sm btn-danger" onclick="removeContainer('${c.name}')">${i18nData['remove'] || 'Remove'}</button>
+                        <button class="btn btn-sm btn-danger" onclick="removeContainer('${c.name}')">${deleteText}</button>
                     </td>
                 </tr>`;
             }).join('');
