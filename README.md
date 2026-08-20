@@ -11,12 +11,14 @@
 
 # Docker Pause Manager
 
-基于 AF_PACKET 包嗅探的 Docker 容器自动休眠管理器。当容器在设定时间内没有网络流量时自动 pause 释放资源，有访问时自动唤醒。
+基于 AF_PACKET 包嗅探的 Docker 容器自动休眠管理器。当容器在设定时间内没有网络流量时自动休眠释放资源，有访问时自动唤醒。支持 **Pause 模式**（释放 CPU，保留内存）和 **Stop 模式**（释放全部资源包括内存）。
 
 ## ✨ 项目特点
 
+- **双模式休眠**：支持 Pause（释放 CPU，保留内存）和 Stop（释放全部资源）两种模式，按容器单独配置
 - **智能休眠**：基于真实网络流量检测，而非端口扫描，准确率高
-- **自动唤醒**：检测到访问请求后瞬间 unpause，用户无感知
+- **自动唤醒**：检测到访问请求后瞬间唤醒，用户无感知
+- **Stop 模式无缝唤醒**：通过 iptables DROP 规则拦截 SYN 包，使客户端 TCP 自动重传，容器启动后重传成功
 - **多端口支持**：支持 TCP/UDP 多端口容器（如媒体服务器）
 - **Web UI**：简洁易用的管理界面，支持中/英/繁体
 - **高亮对比度**：亮色/暗色主题，适合各种使用环境
@@ -27,10 +29,30 @@
 | 特性 | 说明 |
 |------|------|
 | **资源节约** | 闲置容器释放 CPU 和内存，降低主机负载 |
+| **双模式灵活选择** | Pause 模式毫秒级唤醒；Stop 模式彻底释放内存 |
 | **无需修改容器** | 监听宿主机网络接口，容器本身无需修改 |
 | **低开销** | 使用 AF_PACKET 原始套接字，性能优于 iptables |
 | **即插即用** | 一行 docker-compose.yml 即可部署 |
 | **持久化配置** | 配置保存在 `config.json`，容器重启不丢失 |
+
+## 🔄 两种休眠模式对比
+
+| | Pause 模式 | Stop 模式 |
+|---|---|---|
+| **CPU** | ✅ 释放 | ✅ 释放 |
+| **内存** | ❌ 保留 | ✅ 释放 |
+| **网络栈** | 保持活跃 | 销毁 |
+| **唤醒方式** | `docker unpause` | `docker start` |
+| **唤醒速度** | 毫秒级 | 秒级（需启动进程） |
+| **适用场景** | 需要快速响应的服务 | 内存占用大且不常用的服务 |
+
+### Stop 模式工作原理
+
+Stop 后容器端口关闭，客户端会收到 `connection refused`。解决方案：
+1. **stop 前**：为每个 TCP 端口添加 `iptables -I INPUT -p tcp --dport <port> -j DROP`
+2. **DROP 效果**：SYN 包被静默丢弃，客户端 TCP 自动重传（而非收到 RST 报错）
+3. **AF_PACKET 仍能捕获**：DROP 在 INPUT 链生效，包已经到达网卡，嗅探不受影响
+4. **检测到流量** → `docker start` → 移除 DROP 规则 → 客户端重传成功
 
 ## 📋 docker-compose.yml 详解
 
@@ -157,9 +179,17 @@ environment:
 
 1. 启动后监听指定网络接口的所有流量
 2. 轮询所有运行中的容器，检测端口流量
-3. 当容器空闲超过设定时间，自动 pause
-4. 检测到访问请求时，自动 unpause
+3. 当容器空闲超过设定时间，根据模式自动 pause 或 stop
+4. 检测到访问请求时，自动唤醒（pause→unpause，stop→start）
 5. 所有配置保存到 `config.json`，重启后自动加载
+
+### 配置休眠模式
+
+在 Web UI 中添加或编辑容器时，可以选择睡眠模式：
+- **暂停（保留内存）**：Pause 模式，释放 CPU，毫秒级唤醒
+- **停止（释放全部）**：Stop 模式，释放 CPU + 内存，秒级唤醒
+
+每个容器可以独立配置不同的休眠模式。
 
 ---
 
@@ -172,12 +202,14 @@ environment:
 
 # Docker Pause Manager
 
-基於 AF_PACKET 包嗅探的 Docker 容器自動休眠管理器。當容器在設定時間內沒有網路流量時自動 pause 釋放資源，有訪問時自動喚醒。
+基於 AF_PACKET 包嗅探的 Docker 容器自動休眠管理器。當容器在設定時間內沒有網路流量時自動休眠釋放資源，有訪問時自動喚醒。支援 **Pause 模式**（釋放 CPU，保留記憶體）和 **Stop 模式**（釋放全部資源包括記憶體）。
 
 ## ✨ 專案特點
 
+- **雙模式休眠**：支援 Pause（釋放 CPU，保留記憶體）和 Stop（釋放全部資源）兩種模式，按容器單獨配置
 - **智慧休眠**：基於真實網路流量檢測，而非埠掃描，準確率高
-- **自動喚醒**：偵測到訪問請求後瞬間 unpause，用戶無感知
+- **自動喚醒**：偵測到訪問請求後瞬間喚醒，用戶無感知
+- **Stop 模式無縫喚醒**：透過 iptables DROP 規則攔截 SYN 封包，使客戶端 TCP 自動重傳，容器啟動後重傳成功
 - **多埠支援**：支援 TCP/UDP 多埠容器（如媒體伺服器）
 - **Web UI**：簡潔易用的管理介面，支援中/英/繁體
 - **高對比度**：亮色/暗色主題，適合各種使用環境
@@ -188,10 +220,30 @@ environment:
 | 特性 | 說明 |
 |------|------|
 | **資源節約** | 閒置容器釋放 CPU 和記憶體，降低主機負載 |
+| **雙模式靈活選擇** | Pause 模式毫秒級喚醒；Stop 模式徹底釋放記憶體 |
 | **無需修改容器** | 監聽宿主機網路介面，容器本身無需修改 |
 | **低開銷** | 使用 AF_PACKET 原始套接字，效能優於 iptables |
 | **即插即用** | 一行 docker-compose.yml 即可部署 |
 | **持久化配置** | 配置保存在 `config.json`，容器重啟不丟失 |
+
+## 🔄 兩種休眠模式對比
+
+| | Pause 模式 | Stop 模式 |
+|---|---|---|
+| **CPU** | ✅ 釋放 | ✅ 釋放 |
+| **記憶體** | ❌ 保留 | ✅ 釋放 |
+| **網路棧** | 保持活躍 | 銷毀 |
+| **喚醒方式** | `docker unpause` | `docker start` |
+| **喚醒速度** | 毫秒級 | 秒級（需啟動程序） |
+| **適用場景** | 需要快速響應的服務 | 記憶體佔用大且不常用的服務 |
+
+### Stop 模式工作原理
+
+Stop 後容器埠關閉，客戶端會收到 `connection refused`。解決方案：
+1. **stop 前**：為每個 TCP 埠新增 `iptables -I INPUT -p tcp --dport <port> -j DROP`
+2. **DROP 效果**：SYN 封包被靜默丟棄，客戶端 TCP 自動重傳（而非收到 RST 報錯）
+3. **AF_PACKET 仍能捕獲**：DROP 在 INPUT 鏈生效，封包已經到達網卡，嗅探不受影響
+4. **偵測到流量** → `docker start` → 移除 DROP 規則 → 客戶端重傳成功
 
 ## 📋 docker-compose.yml 詳解
 
@@ -318,9 +370,17 @@ environment:
 
 1. 啟動後監聽指定網路介面的所有流量
 2. 輪詢所有執行中的容器，檢測埠流量
-3. 當容器空閒超過設定時間，自動 pause
-4. 偵測到訪問請求時，自動 unpause
+3. 當容器空閒超過設定時間，根據模式自動 pause 或 stop
+4. 偵測到訪問請求時，自動喚醒（pause→unpause，stop→start）
 5. 所有配置儲存到 `config.json`，重啟後自動載入
+
+### 配置休眠模式
+
+在 Web UI 中新增或編輯容器時，可以選擇睡眠模式：
+- **暫停（保留記憶體）**：Pause 模式，釋放 CPU，毫秒級喚醒
+- **停止（釋放全部）**：Stop 模式，釋放 CPU + 記憶體，秒級喚醒
+
+每個容器可以獨立配置不同的休眠模式。
 
 ---
 
@@ -333,12 +393,14 @@ environment:
 
 # Docker Pause Manager
 
-Docker container auto-sleep manager based on AF_PACKET packet sniffing. Automatically pauses containers with no network traffic for a set time, and wakes them on demand.
+Docker container auto-sleep manager based on AF_PACKET packet sniffing. Automatically sleeps containers with no network traffic for a set time, and wakes them on demand. Supports **Pause mode** (release CPU, keep memory) and **Stop mode** (release all resources including memory).
 
 ## ✨ Features
 
+- **Dual Sleep Modes**: Supports Pause (release CPU, keep memory) and Stop (release all resources) modes, configurable per container
 - **Smart Sleep Detection**: Based on real network traffic analysis, high accuracy
-- **Instant Wake-up**: Automatically unpause when access is detected, transparent to users
+- **Instant Wake-up**: Automatically wakes when access is detected, transparent to users
+- **Stop Mode Seamless Wake-up**: Uses iptables DROP rules to intercept SYN packets, causing client TCP to auto-retransmit, succeeding after container starts
 - **Multi-port Support**: Supports containers with multiple TCP/UDP ports
 - **Web UI**: Clean and intuitive management interface, supports CN/EN/Traditional Chinese
 - **High Contrast UI**: Light/dark themes for various environments
@@ -349,10 +411,30 @@ Docker container auto-sleep manager based on AF_PACKET packet sniffing. Automati
 | Feature | Description |
 |---------|-------------|
 | **Resource Saving** | Idle containers release CPU and memory, reducing host load |
+| **Flexible Mode Selection** | Pause mode for millisecond wake-up; Stop mode for full memory release |
 | **No Container Modification** | Listens on host network interfaces, containers unchanged |
 | **Low Overhead** | Uses AF_PACKET raw sockets, better performance than iptables |
 | **Plug & Play** | One-line docker-compose.yml to deploy |
 | **Persistent Config** | Config saved to `config.json`, survives container restart |
+
+## 🔄 Sleep Mode Comparison
+
+| | Pause Mode | Stop Mode |
+|---|---|---|
+| **CPU** | ✅ Released | ✅ Released |
+| **Memory** | ❌ Kept | ✅ Released |
+| **Network Stack** | Active | Destroyed |
+| **Wake Method** | `docker unpause` | `docker start` |
+| **Wake Speed** | Milliseconds | Seconds (process startup) |
+| **Use Case** | Services needing fast response | High-memory, rarely used services |
+
+### Stop Mode Technical Details
+
+After stop, container ports close and clients get `connection refused`. Solution:
+1. **Before stop**: Add `iptables -I INPUT -p tcp --dport <port> -j DROP` for each TCP port
+2. **DROP effect**: SYN packets silently dropped, client TCP auto-retransmits (instead of getting RST error)
+3. **AF_PACKET still captures**: DROP is on INPUT chain, packets already reached NIC, sniffing unaffected
+4. **Traffic detected** → `docker start` → remove DROP rules → client retransmission succeeds
 
 ## 📋 docker-compose.yml Explained
 
@@ -479,9 +561,17 @@ Change password after first login:
 
 1. On startup, monitor all traffic on specified network interfaces
 2. Poll all running containers, detect port traffic
-3. Auto-pause containers idle beyond the set time
-4. Auto-unpause when access requests are detected
+3. Auto-sleep containers idle beyond the set time (pause or stop based on mode)
+4. Auto-wake when access requests are detected (pause→unpause, stop→start)
 5. All configs saved to `config.json`, auto-loaded on restart
+
+### Configuring Sleep Mode
+
+When adding or editing a container in the Web UI, you can select the sleep mode:
+- **Pause (keep memory)**: Pause mode, releases CPU, millisecond wake-up
+- **Stop (release all)**: Stop mode, releases CPU + memory, second-level wake-up
+
+Each container can be independently configured with a different sleep mode.
 
 ---
 
