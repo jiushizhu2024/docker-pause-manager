@@ -325,6 +325,7 @@
                         <th data-i18n="containers">容器名</th>
                         <th data-i18n="ports">端口</th>
                         <th data-i18n="idle_timeout">空闲时间</th>
+                        <th data-i18n="sleep_mode">模式</th>
                         <th data-i18n="settings">操作</th>
                     </tr>
                 </thead>
@@ -374,6 +375,13 @@
                 </label>
                 <input type="number" class="form-control" id="timeout-value" placeholder="秒" style="margin-top:8px; display:none">
             </div>
+            <div class="form-group">
+                <label data-i18n="sleep_mode">睡眠模式</label>
+                <select class="form-control" id="add-sleep-mode">
+                    <option value="pause" data-i18n="mode_pause">暂停(保留内存)</option>
+                    <option value="stop" data-i18n="mode_stop">停止(释放全部)</option>
+                </select>
+            </div>
             <div class="modal-actions">
                 <button class="btn btn-danger" onclick="closeAddModal()" data-i18n="cancel">取消</button>
                 <button class="btn btn-success" onclick="addContainer()" data-i18n="confirm">确认</button>
@@ -410,6 +418,13 @@
                     <span data-i18n="per_container_timeout">单独设置超时</span>
                 </label>
                 <input type="number" class="form-control" id="edit-timeout-value" placeholder="秒" style="margin-top:8px; display:none">
+            </div>
+            <div class="form-group">
+                <label data-i18n="sleep_mode">睡眠模式</label>
+                <select class="form-control" id="edit-sleep-mode">
+                    <option value="pause" data-i18n="mode_pause">暂停(保留内存)</option>
+                    <option value="stop" data-i18n="mode_stop">停止(释放全部)</option>
+                </select>
             </div>
             <div class="modal-actions">
                 <button class="btn btn-danger" onclick="closeEditModal()" data-i18n="cancel">取消</button>
@@ -584,19 +599,24 @@
             tbody.innerHTML = containers.map(c => {
                 const statusClass = c.status === 'running' ? 'status-running' : 
                                    c.status === 'paused' ? 'status-paused' : 'status-exited';
-                const statusText = i18nData[c.status] || c.status;
+                const statusText = i18nData[c.status] || (c.status === 'exited' ? (i18nData['stopped'] || 'Stopped') : c.status);
                 const ports = (c.ports || []).map(p => `<span class="port-tag">${p.port}/${p.proto}</span>`).join('');
-                const btnText = c.status === 'paused' ? (i18nData['unpause'] || 'Unpause') :
-                               (i18nData['pause'] || 'Pause');
-                const deleteText = i18nData['remove'] || 'Remove';
+                const modeText = c.sleep_mode === 'stop' ? (i18nData['mode_stop'] || 'Stop') : (i18nData['mode_pause'] || 'Pause');
+                const btnClass = c.status === 'paused' || c.status === 'exited' ? 'btn-success' : 'btn-warning';
+                const btnText = c.status === 'paused' || c.status === 'exited' ? (i18nData['unpause'] || 'Unpause') :
+                               (c.sleep_mode === 'stop' ? (i18nData['stop'] || 'Stop') : (i18nData['pause'] || 'Pause'));
+                const btnAction = c.status === 'paused' || c.status === 'exited' ? 
+                    `unpause('${c.name}')` : 
+                    (c.sleep_mode === 'stop' ? `stop('${c.name}')` : `pause('${c.name}')`);
                 return `<tr>
                     <td><span class="status-badge ${statusClass}">${statusText}</span></td>
                     <td><strong>${c.name}</strong></td>
                     <td>${ports}</td>
                     <td>${Math.floor(c.idle_seconds / 60)}m ${c.idle_seconds % 60}s / ${c.idle_timeout}s</td>
+                    <td><span class="port-tag" style="background:var(--info-bg);color:var(--info)">${modeText}</span></td>
                     <td class="btn-group">
-                        <button class="btn btn-sm ${c.status === 'paused' ? 'btn-success' : 'btn-warning'}"
-                            onclick="${c.status === 'paused' ? `unpause('${c.name}')` : `pause('${c.name}')`}">
+                        <button class="btn btn-sm ${btnClass}"
+                            onclick="${btnAction}">
                             ${btnText}
                         </button>
                         <button class="btn btn-sm btn-primary" onclick="editContainer('${c.name}')">${i18nData['edit'] || 'Edit'}</button>
@@ -607,6 +627,7 @@
         }
         
         async function pause(name) { await api(`/api/pause/${name}`, {method:'POST'}); fetchStatus(); }
+        async function stop(name) { await api(`/api/stop/${name}`, {method:'POST'}); fetchStatus(); }
         async function unpause(name) { await api(`/api/unpause/${name}`, {method:'POST'}); fetchStatus(); }
         async function removeContainer(name) {
             if (!confirm(`${i18nData['remove_confirm'] || 'Confirm removal'} ${name}?`)) return;
@@ -628,6 +649,7 @@
             
             currentEditPorts = (c.ports || []).map(p => ({port: p.port, proto: p.proto}));
             currentEditTimeout = c.idle_timeout || null;
+            document.getElementById('edit-sleep-mode').value = c.sleep_mode || 'pause';
             
             document.getElementById('edit-container-name').value = name;
             renderEditPorts();
@@ -680,9 +702,10 @@
             
             const customTimeout = document.getElementById('edit-custom-timeout').checked;
             const timeout = customTimeout ? parseInt(document.getElementById('edit-timeout-value').value) : null;
+            const sleepMode = document.getElementById('edit-sleep-mode').value;
             
             await api('/api/edit_container', {method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({name: currentEditName, ports: currentEditPorts, idle_timeout: timeout})});
+                body: JSON.stringify({name: currentEditName, ports: currentEditPorts, idle_timeout: timeout, sleep_mode: sleepMode})});
             
             closeEditModal();
             fetchStatus();
@@ -765,9 +788,10 @@
             
             const customTimeout = document.getElementById('custom-timeout').checked;
             const timeout = customTimeout ? parseInt(document.getElementById('timeout-value').value) : null;
+            const sleepMode = document.getElementById('add-sleep-mode').value;
             
             await api('/api/add_container', {method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({name, ports, idle_timeout: timeout})});
+                body: JSON.stringify({name, ports, idle_timeout: timeout, sleep_mode: sleepMode})});
             
             closeAddModal();
             fetchStatus();

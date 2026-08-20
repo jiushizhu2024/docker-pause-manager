@@ -127,17 +127,64 @@ def unpause_container(container_name):
             return False
     return False
 
-def start_container(container_name):
+def stop_container(container_name):
+    """停止容器并添加 iptables DROP 规则拦截 SYN，使客户端 TCP 重传"""
     container = get_container(container_name)
-    if container and container.status == "exited":
-        try:
-            container.start()
+    if not container or container.status != "running":
+        return False
+    try:
+        # 先获取容器端口列表
+        ports = get_container_ports(container_name)
+        # 停止容器
+        _docker_api("POST", f"/containers/{container.id}/stop")
+        # 为每个 TCP 端口添加 iptables DROP 规则
+        for port_info in ports:
+            port = port_info.get("port", 0)
+            proto = port_info.get("proto", "tcp")
+            if proto == "tcp" and port:
+                try:
+                    subprocess.run(
+                        ["iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(port),
+                         "-j", "DROP"],
+                        capture_output=True, timeout=5
+                    )
+                    log.info(f"[{container_name}] iptables DROP 规则已添加 (port {port}/tcp)")
+                except Exception as e:
+                    log.warning(f"[{container_name}] iptables 规则添加失败 (port {port}): {e}")
+        log.info(f"[{container_name}] 已停止 (stop)")
+        return True
+    except Exception as e:
+        log.error(f"[{container_name}] 停止失败: {e}")
+        return False
+
+def start_container(container_name):
+    """启动容器并移除 iptables DROP 规则"""
+    container = get_container(container_name)
+    if not container:
+        return False
+    try:
+        if container.status == "exited":
+            _docker_api("POST", f"/containers/{container.id}/start")
             log.info(f"[{container_name}] 已启动 (start)")
-            return True
-        except Exception as e:
-            log.error(f"[{container_name}] 启动失败: {e}")
-            return False
-    return False
+        # 移除 iptables DROP 规则（无论容器当前状态如何）
+        ports = get_container_ports(container_name)
+        for port_info in ports:
+            port = port_info.get("port", 0)
+            proto = port_info.get("proto", "tcp")
+            if proto == "tcp" and port:
+                try:
+                    subprocess.run(
+                        ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
+                         "-j", "DROP"],
+                        capture_output=True, timeout=5
+                    )
+                    log.info(f"[{container_name}] iptables DROP 规则已移除 (port {port}/tcp)")
+                except Exception:
+                    pass
+        return True
+    except Exception as e:
+        log.error(f"[{container_name}] 启动失败: {e}")
+        return False
 
 def get_container(container_name):
     try:
@@ -457,7 +504,8 @@ def api_status():
             "idle_seconds": state["idle_seconds"],
             "idle_timeout": state["idle_timeout"],
             "is_paused_by_us": state["is_paused_by_us"],
-            "ports": state["ports"]
+            "ports": state["ports"],
+            "sleep_mode": state.get("sleep_mode", "pause")
         }
         result["containers"].append(entry)
         result["total"] += 1
@@ -476,15 +524,35 @@ def api_pause(container_name):
         return jsonify({"success": True})
     return jsonify({"success": False, "error": "容器不存在或未运行"}), 404
 
+@app.route("/api/stop/<container_name>", methods=["POST"])
+@token_required
+def api_stop(container_name):
+    """手动停止容器（stop 模式）"""
+    if stop_container(container_name):
+        if container_name in monitor.container_states:
+            monitor.container_states[container_name]["is_paused_by_us"] = True
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": "容器不存在或未运行"}), 404
+
 @app.route("/api/unpause/<container_name>", methods=["POST"])
 @token_required
 def api_unpause(container_name):
-    if unpause_container(container_name):
-        if container_name in monitor.container_states:
-            monitor.container_states[container_name]["is_paused_by_us"] = False
-            monitor.container_states[container_name]["idle_seconds"] = 0
-        return jsonify({"success": True})
-    return jsonify({"success": False, "error": "容器未暂停"}), 404
+    # 根据容器当前状态选择唤醒方式
+    container = get_container(container_name)
+    if not container:
+        return jsonify({"success": False, "error": "容器不存在"}), 404
+    
+    if container.status == "paused":
+        unpause_container(container_name)
+    elif container.status == "exited":
+        start_container(container_name)
+    else:
+        return jsonify({"success": False, "error": "容器未暂停或未停止"}), 404
+    
+    if container_name in monitor.container_states:
+        monitor.container_states[container_name]["is_paused_by_us"] = False
+        monitor.container_states[container_name]["idle_seconds"] = 0
+    return jsonify({"success": True})
 
 @app.route("/api/start/<container_name>", methods=["POST"])
 @token_required
@@ -511,7 +579,8 @@ def api_list_containers():
             "name": c["name"],
             "status": c["status"],
             "ports": ports,
-            "monitored": is_monitored
+            "monitored": is_monitored,
+            "sleep_mode": MONITORED_CONTAINERS.get(c["name"], {}).get("sleep_mode", "pause") if is_monitored else "pause"
         })
     return jsonify(result)
 
@@ -545,7 +614,8 @@ def api_add_container():
     # 添加或更新配置
     cfg_entry = {
         "ports": ports,
-        "idle_timeout": int(idle_timeout) if idle_timeout else DEFAULT_IDLE_TIMEOUT
+        "idle_timeout": int(idle_timeout) if idle_timeout else DEFAULT_IDLE_TIMEOUT,
+        "sleep_mode": data.get("sleep_mode", "pause")
     }
     
     MONITORED_CONTAINERS[container_name] = cfg_entry
@@ -621,7 +691,8 @@ def api_edit_container():
     # 更新配置
     MONITORED_CONTAINERS[container_name] = {
         "ports": ports,
-        "idle_timeout": int(idle_timeout) if idle_timeout else DEFAULT_IDLE_TIMEOUT
+        "idle_timeout": int(idle_timeout) if idle_timeout else DEFAULT_IDLE_TIMEOUT,
+        "sleep_mode": data.get("sleep_mode", "pause")
     }
 
     # 更新监控器状态
@@ -629,6 +700,7 @@ def api_edit_container():
         monitor.container_states[container_name]["ports"] = ports
         if idle_timeout:
             monitor.container_states[container_name]["idle_timeout"] = int(idle_timeout)
+        monitor.container_states[container_name]["sleep_mode"] = data.get("sleep_mode", "pause")
 
     # 保存配置
     save_config({"admin_password": ADMIN_PASSWORD, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
@@ -769,7 +841,12 @@ def api_i18n(lang):
             "saved": "已保存",
             "no_containers": "暂无监控容器，点击\"添加容器\"开始",
             "remove_confirm": "确认移除",
-            "password": "请输入密码"
+            "password": "请输入密码",
+            "stop": "停止",
+            "sleep_mode": "睡眠模式",
+            "mode_pause": "暂停(保留内存)",
+            "mode_stop": "停止(释放全部)",
+            "stopped": "已停止"
         },
         "zh-TW": {
             "title": "Docker Pause Manager",
@@ -815,7 +892,12 @@ def api_i18n(lang):
             "saved": "已儲存",
             "no_containers": "暫無監控容器，點擊\"新增容器\"開始",
             "remove_confirm": "確認移除",
-            "password": "請輸入密碼"
+            "password": "請輸入密碼",
+            "stop": "停止",
+            "sleep_mode": "睡眠模式",
+            "mode_pause": "暫停(保留記憶體)",
+            "mode_stop": "停止(釋放全部)",
+            "stopped": "已停止"
         },
         "en": {
             "title": "Docker Pause Manager",
@@ -861,7 +943,12 @@ def api_i18n(lang):
             "saved": "Saved",
             "no_containers": "No containers being monitored, click 'Add Container' to start",
             "remove_confirm": "Confirm removal",
-            "password": "Enter password"
+            "password": "Enter password",
+            "stop": "Stop",
+            "sleep_mode": "Sleep Mode",
+            "mode_pause": "Pause (keep memory)",
+            "mode_stop": "Stop (release all)",
+            "stopped": "Stopped"
         }
     }
     return jsonify(i18n.get(lang, i18n["en"]))
@@ -912,7 +999,13 @@ class ContainerMonitor:
                         "is_paused_by_us": was_paused_by_us,
                         "ports": cfg.get("ports", []),
                         "idle_timeout": cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT),
+                        "sleep_mode": cfg.get("sleep_mode", "pause"),
                     }
+                else:
+                    # 更新已有容器的配置
+                    self.container_states[name]["ports"] = cfg.get("ports", [])
+                    self.container_states[name]["idle_timeout"] = cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT)
+                    self.container_states[name]["sleep_mode"] = cfg.get("sleep_mode", "pause")
             for name in list(self.container_states.keys()):
                 if name not in containers_cfg:
                     del self.container_states[name]
@@ -923,19 +1016,25 @@ class ContainerMonitor:
             for name, state in self.container_states.items():
                 ports = state["ports"]
                 idle_timeout = state["idle_timeout"]
+                sleep_mode = state.get("sleep_mode", "pause")
 
                 container = get_container(name)
                 if not container:
                     continue
 
-                if container.status == "exited" and state["is_paused_by_us"]:
-                    log.info(f"[{name}] 重启后恢复中 (exited→starting)")
-                    start_container(name)
-                    state["is_paused_by_us"] = False
-                    state["idle_seconds"] = 0
-                    needs_save = True
+                # --- exited 状态处理（stop 模式或重启后恢复） ---
+                if container.status == "exited":
+                    if state["is_paused_by_us"]:
+                        # 管理器停掉的容器，检测到流量后启动
+                        if has_new_connection(name, ports):
+                            log.info(f"[{name}] 检测到流量，正在启动 (stop mode)")
+                            start_container(name)
+                            state["idle_seconds"] = 0
+                            state["is_paused_by_us"] = False
+                            needs_save = True
                     continue
 
+                # --- paused 状态处理 ---
                 if container.status == "paused" and not state["is_paused_by_us"]:
                     state["is_paused_by_us"] = True
                     state["idle_seconds"] = 0
@@ -950,6 +1049,7 @@ class ContainerMonitor:
                         needs_save = True
                     continue
 
+                # --- running 状态：检测空闲超时 ---
                 if container.status == "running":
                     has_active = False
                     for port_info in ports:
@@ -965,7 +1065,11 @@ class ContainerMonitor:
                     else:
                         state["idle_seconds"] += CHECK_INTERVAL
                         if state["idle_seconds"] >= idle_timeout:
-                            pause_container(name)
+                            if sleep_mode == "stop":
+                                log.info(f"[{name}] 空闲 {state['idle_seconds']}s，停止容器 (stop mode)")
+                                stop_container(name)
+                            else:
+                                pause_container(name)
                             state["is_paused_by_us"] = True
                             needs_save = True
             if needs_save:
@@ -1003,7 +1107,12 @@ def event_handler_loop():
                     matching_ports = [p for p in state["ports"] if int(p.get("port", 0)) == port]
                     if matching_ports and state["is_paused_by_us"]:
                         log.info(f"[事件驱动] [{name}] 立即唤醒 (port={port})")
-                        unpause_container(name)
+                        # 根据睡眠模式选择唤醒方式
+                        sleep_mode = state.get("sleep_mode", "pause")
+                        if sleep_mode == "stop":
+                            start_container(name)
+                        else:
+                            unpause_container(name)
                         state["idle_seconds"] = 0
                         state["is_paused_by_us"] = False
                         # 保存状态
