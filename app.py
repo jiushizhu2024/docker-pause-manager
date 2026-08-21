@@ -159,6 +159,7 @@ def stop_container(container_name):
 
 def start_container(container_name):
     """启动容器并移除 iptables DROP 规则"""
+    global _iptables_drop_counts
     container = get_container(container_name)
     if not container:
         return False
@@ -179,6 +180,8 @@ def start_container(container_name):
                         capture_output=True, timeout=5
                     )
                     log.info(f"[{container_name}] iptables DROP 规则已移除 (port {port}/tcp)")
+                    # 清除该端口的计数跟踪
+                    _iptables_drop_counts.pop(f"{container_name}:{port}", None)
                 except Exception:
                     pass
         return True
@@ -1166,27 +1169,86 @@ def event_handler_loop():
                         state["is_paused_by_us"] = False
                         # 保存状态
                         monitor._save_state()
+        
         except Exception as e:
             log.error(f"[事件处理] 异常: {e}")
+        
+        # 额外检查：所有 exited 容器也通过 iptables 规则检测
+        try:
+            for name, state in list(monitor.container_states.items()):
+                if state.get("is_paused_by_us", False):
+                    container = get_container(name)
+                    if container and container.status == "exited":
+                        sleep_mode = state.get("sleep_mode", "pause")
+                        if sleep_mode == "stop" and has_new_connection(name, state.get("ports", [])):
+                            log.info(f"[iptables 轮询] [{name}] 检测到流量，启动容器")
+                            start_container(name)
+                            state["idle_seconds"] = 0
+                            state["is_paused_by_us"] = False
+                            monitor._save_state()
+        except Exception as e:
+            log.error(f"[iptables 轮询] 异常: {e}")
 
 def has_new_connection(container_name, ports):
-    """检查是否有新连接（仅检查 packet counter，不触碰事件队列）"""
+    """检查是否有新连接（优先检查 iptables DROP 规则命中数，再检查 packet counter）"""
     global packet_counter
-    if packet_counter is None:
-        return _has_new_connection_conntrack(container_name, ports)
     
     try:
-        for port_info in ports:
-            port = int(port_info.get("port", 0))
-            if port in packet_counter.ports:
-                count = packet_counter.get_count(port)
-                if count > 0:
-                    packet_counter.reset_count(port)
-                    log.info(f"[{container_name}] 检测到流量 (port={port}, packets={count})")
-                    return True
+        # 方法1: 检查 iptables DROP 规则命中（最可靠，不受 AF_PACKET 影响）
+        if _check_iptables_drop_hit(container_name, ports):
+            log.info(f"[{container_name}] iptables DROP 规则检测到流量")
+            return True
+        
+        # 方法2: 检查 packet counter（AF_PACKET 嗅探）
+        if packet_counter:
+            for port_info in ports:
+                port = int(port_info.get("port", 0))
+                if port in packet_counter.ports:
+                    count = packet_counter.get_count(port)
+                    if count > 0:
+                        packet_counter.reset_count(port)
+                        log.info(f"[{container_name}] 检测到流量 (port={port}, packets={count})")
+                        return True
+        
         return False
     except Exception as e:
         log.debug(f"[{container_name}] 检查流量失败: {e}")
+        return False
+
+
+# 跟踪 iptables DROP 规则的历史命中数，避免重复唤醒
+_iptables_drop_counts = {}
+
+def _check_iptables_drop_hit(container_name, ports):
+    """检查 iptables DROP 规则是否有新命中"""
+    global _iptables_drop_counts
+    try:
+        result = subprocess.run(
+            ["iptables", "-L", "INPUT", "-n", "-v", "-x"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.split("\n"):
+            parts = line.strip().split()
+            if len(parts) >= 8 and parts[2] == "DROP":
+                try:
+                    pkts = int(parts[0])
+                    dport_part = parts[-1]  # 例如 dpt:9443
+                    if dport_part.startswith("dpt:"):
+                        rule_port = int(dport_part.split(":")[1])
+                        for port_info in ports:
+                            if int(port_info.get("port", 0)) == rule_port:
+                                key = f"{container_name}:{rule_port}"
+                                last = _iptables_drop_counts.get(key, 0)
+                                if pkts > last:
+                                    _iptables_drop_counts[key] = pkts
+                                    log.info(f"[{container_name}] iptables 规则新命中 (port={rule_port}, pkts={pkts}, last={last})")
+                                    return True
+                                break
+                except (ValueError, IndexError):
+                    continue
+        return False
+    except Exception as e:
+        log.debug(f"iptables 检查失败: {e}")
         return False
 
 def _has_new_connection_conntrack(container_name, ports):
