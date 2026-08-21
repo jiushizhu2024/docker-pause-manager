@@ -1170,30 +1170,19 @@ def event_handler_loop():
             log.error(f"[事件处理] 异常: {e}")
 
 def has_new_connection(container_name, ports):
-    """检查是否有新连接（使用事件队列优先）"""
+    """检查是否有新连接（仅检查 packet counter，不触碰事件队列）"""
     global packet_counter
     if packet_counter is None:
         return _has_new_connection_conntrack(container_name, ports)
     
     try:
-        # 先检查事件队列（立即唤醒）
-        events = event_queue.get_all()
-        if events:
-            log.info(f"[{container_name}] 事件队列检测到流量，ports={list(events.keys())}")
-            for port in ports:
-                port_num = int(port.get("port", 0))
-                if port_num in events:
-                    log.info(f"[{container_name}] 已唤醒 (event-driven, port={port_num})")
-                    return True
-        
-        # 如果事件队列为空，使用轮询方式（兼容性检查）
         for port_info in ports:
             port = int(port_info.get("port", 0))
             if port in packet_counter.ports:
                 count = packet_counter.get_count(port)
                 if count > 0:
-                    log.info(f"[{container_name}] 检测到流量 (port={port}, packets={count})")
                     packet_counter.reset_count(port)
+                    log.info(f"[{container_name}] 检测到流量 (port={port}, packets={count})")
                     return True
         return False
     except Exception as e:
