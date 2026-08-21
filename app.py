@@ -212,9 +212,16 @@ def get_container_state(container_name):
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/app/config.json")
 STATE_PATH = os.environ.get("STATE_PATH", "/app/state.json")
 
+# 密码哈希函数
+def hash_password(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+DEFAULT_PASSWORD = "admin123"
+DEFAULT_PASSWORD_HASH = hash_password(DEFAULT_PASSWORD)
+
 # 默认配置
 DEFAULT_CONFIG = {
-    "admin_password": "admin123",
+    "admin_password": DEFAULT_PASSWORD_HASH,
     "idle_timeout": 300,
     "check_interval": 10,
     "net_interface": "eth0",
@@ -262,8 +269,9 @@ def save_config(cfg):
 
 CONFIG = load_config()
 
-# 管理员密码
-ADMIN_PASSWORD = CONFIG.get("admin_password", "admin123")
+# 管理员密码（从配置文件加载哈希值）
+_stored_hash = CONFIG.get("admin_password")
+ADMIN_PASSWORD_HASH = _stored_hash if _stored_hash else DEFAULT_PASSWORD_HASH
 
 # 连续空闲超时（秒），默认 5 分钟
 DEFAULT_IDLE_TIMEOUT = CONFIG.get("idle_timeout", 300)
@@ -473,7 +481,7 @@ def init_packet_counter():
 # ========== 登录认证 ==========
 
 def verify_token(token):
-    return token == hashlib.sha256(f"dpm-{ADMIN_PASSWORD}".encode()).hexdigest()
+    return token == hashlib.sha256(f"dpm-{ADMIN_PASSWORD_HASH}".encode()).hexdigest()
 
 def token_required(f):
     @wraps(f)
@@ -487,10 +495,10 @@ def token_required(f):
 @app.route("/api/login", methods=["POST"])
 def api_login():
     data = request.get_json()
-    if not data or data.get("password") != ADMIN_PASSWORD:
+    if not data or hash_password(data.get("password", "")) != ADMIN_PASSWORD_HASH:
         return jsonify({"error": "密码错误"}), 401
-    token = hashlib.sha256(f"dpm-{ADMIN_PASSWORD}".encode()).hexdigest()
-    return jsonify({"success": True, "token": token, "password": ADMIN_PASSWORD})
+    token = hashlib.sha256(f"dpm-{ADMIN_PASSWORD_HASH}".encode()).hexdigest()
+    return jsonify({"success": True, "token": token})
 
 @app.route("/api/status")
 @token_required
@@ -619,7 +627,7 @@ def api_add_container():
     }
     
     MONITORED_CONTAINERS[container_name] = cfg_entry
-    save_config({"admin_password": ADMIN_PASSWORD, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
+    save_config({"admin_password": ADMIN_PASSWORD_HASH, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
                  "check_interval": CHECK_INTERVAL, "net_interface": NETWORK_INTERFACE,
                  "theme": CONFIG.get("theme", "light"), "language": CONFIG.get("language", "zh-CN"),
                  "containers": MONITORED_CONTAINERS})
@@ -660,7 +668,7 @@ def api_remove_container():
         del monitor.container_states[container_name]
 
     # 保存配置
-    save_config({"admin_password": ADMIN_PASSWORD, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
+    save_config({"admin_password": ADMIN_PASSWORD_HASH, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
                  "check_interval": CHECK_INTERVAL, "net_interface": NETWORK_INTERFACE,
                  "theme": CONFIG.get("theme", "light"), "language": CONFIG.get("language", "zh-CN"),
                  "containers": MONITORED_CONTAINERS})
@@ -703,7 +711,7 @@ def api_edit_container():
         monitor.container_states[container_name]["sleep_mode"] = data.get("sleep_mode", "pause")
 
     # 保存配置
-    save_config({"admin_password": ADMIN_PASSWORD, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
+    save_config({"admin_password": ADMIN_PASSWORD_HASH, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
                  "check_interval": CHECK_INTERVAL, "net_interface": NETWORK_INTERFACE,
                  "theme": CONFIG.get("theme", "light"), "language": CONFIG.get("language", "zh-CN"),
                  "containers": MONITORED_CONTAINERS})
@@ -717,11 +725,10 @@ def api_edit_container():
 @app.route("/api/settings", methods=["GET", "PUT"])
 def api_settings():
     """获取或更新全局设置"""
-    global ADMIN_PASSWORD, DEFAULT_IDLE_TIMEOUT, CHECK_INTERVAL, NETWORK_INTERFACE
+    global ADMIN_PASSWORD_HASH, DEFAULT_IDLE_TIMEOUT, CHECK_INTERVAL, NETWORK_INTERFACE
     
     if request.method == "GET":
         return jsonify({
-            "admin_password": ADMIN_PASSWORD,
             "idle_timeout": DEFAULT_IDLE_TIMEOUT,
             "check_interval": CHECK_INTERVAL,
             "net_interface": NETWORK_INTERFACE,
@@ -744,15 +751,14 @@ def api_settings():
         pw_update = data["password_update"]
         old_pw = pw_update.get("old_password", "")
         new_pw = pw_update.get("new_password", "")
-        if old_pw != ADMIN_PASSWORD:
+        if hash_password(old_pw) != ADMIN_PASSWORD_HASH:
             return jsonify({"error": "当前密码错误"}), 401
         if len(new_pw) < 4:
             return jsonify({"error": "密码至少4位"}), 400
-        ADMIN_PASSWORD = new_pw
-        CONFIG["admin_password"] = new_pw
+        new_hash = hash_password(new_pw)
+        ADMIN_PASSWORD_HASH = new_hash
+        CONFIG["admin_password"] = new_hash
     
-    if "admin_password" in data:
-        ADMIN_PASSWORD = data["admin_password"]
     if "idle_timeout" in data:
         DEFAULT_IDLE_TIMEOUT = int(data["idle_timeout"])
     if "check_interval" in data:
@@ -785,7 +791,7 @@ def api_config():
         MONITORED_CONTAINERS[name] = cfg
     
     monitor.update_config(MONITORED_CONTAINERS)
-    save_config({"admin_password": ADMIN_PASSWORD, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
+    save_config({"admin_password": ADMIN_PASSWORD_HASH, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
                  "check_interval": CHECK_INTERVAL, "net_interface": NETWORK_INTERFACE,
                  "theme": CONFIG.get("theme", "light"), "language": CONFIG.get("language", "zh-CN"),
                  "containers": MONITORED_CONTAINERS})
@@ -846,7 +852,8 @@ def api_i18n(lang):
             "sleep_mode": "睡眠模式",
             "mode_pause": "暂停(保留内存)",
             "mode_stop": "停止(释放全部)",
-            "stopped": "已停止"
+            "stopped": "已停止",
+            "batch_hint": "按住 Ctrl 点击可多选"
         },
         "zh-TW": {
             "title": "Docker Pause Manager",
@@ -897,7 +904,8 @@ def api_i18n(lang):
             "sleep_mode": "睡眠模式",
             "mode_pause": "暫停(保留記憶體)",
             "mode_stop": "停止(釋放全部)",
-            "stopped": "已停止"
+            "stopped": "已停止",
+            "batch_hint": "按住 Ctrl 點擊可多選"
         },
         "en": {
             "title": "Docker Pause Manager",
@@ -948,7 +956,8 @@ def api_i18n(lang):
             "sleep_mode": "Sleep Mode",
             "mode_pause": "Pause (keep memory)",
             "mode_stop": "Stop (release all)",
-            "stopped": "Stopped"
+            "stopped": "Stopped",
+            "batch_hint": "Hold Ctrl to select multiple"
         }
     }
     return jsonify(i18n.get(lang, i18n["en"]))

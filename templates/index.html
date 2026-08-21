@@ -342,10 +342,10 @@
         <div class="modal">
             <h3 data-i18n="add_container">添加容器</h3>
             <div class="form-group">
-                <label data-i18n="containers">容器</label>
-                <select class="form-control" id="select-container" onchange="loadContainerPorts()">
-                    <option value="">-- 选择容器 --</option>
+                <label data-i18n="containers">容器（可多选）</label>
+                <select class="form-control" id="select-container" multiple style="height:150px">
                 </select>
+                <div style="margin-top:6px; color:var(--text-muted); font-size:13px;" data-i18n="batch_hint">按住 Ctrl 点击可多选</div>
             </div>
             <div class="form-group">
                 <label class="checkbox-label">
@@ -716,24 +716,22 @@
         async function showAddModal() {
             document.getElementById('add-modal').classList.add('active');
             const sel = document.getElementById('select-container');
-            sel.innerHTML = '<option value="">-- 选择容器 --</option>';
+            sel.innerHTML = '';
 
             try {
                 const containers = await api('/api/containers');
-                console.log('Containers API response:', containers);
                 const unmonitored = containers.filter(c => !c.monitored);
-                console.log('Unmonitored containers:', unmonitored.length);
                 unmonitored.forEach(c => {
                     sel.innerHTML += `<option value="${c.name}">${c.name} (${c.status})</option>`;
                 });
                 if (unmonitored.length === 0) {
-                    sel.innerHTML = '<option value="">暂无可用容器</option>';
+                    sel.innerHTML = '<option value="" disabled>暂无可用容器</option>';
                 }
             } catch(e) {
                 console.error('Failed to load containers:', e);
-                sel.innerHTML = '<option value="">加载失败</option>';
+                sel.innerHTML = '<option value="" disabled>加载失败</option>';
             }
-            loadContainerPorts();
+            document.getElementById('ports-list').innerHTML = '';
         }
         
         function closeAddModal() { document.getElementById('add-modal').classList.remove('active'); }
@@ -775,27 +773,43 @@
         });
         
         async function addContainer() {
-            const name = document.getElementById('select-container').value;
-            if (!name) return alert(i18nData['select_container'] || '请选择容器');
+            const select = document.getElementById('select-container');
+            const selected = Array.from(select.selectedOptions).map(o => o.value);
+            if (selected.length === 0) return alert(i18nData['select_container'] || '请选择容器');
             
-            const ports = [];
-            document.querySelectorAll('#ports-list .port-tag').forEach(tag => {
-                const m = tag.textContent.match(/^(\d+)\/(\w+)/);
-                if (m) ports.push({port: parseInt(m[1]), proto: m[2]});
-            });
-            
-            if (!ports.length) return alert(i18nData['add_ports'] || '请添加端口');
-            
+            const sleepMode = document.getElementById('add-sleep-mode').value;
             const customTimeout = document.getElementById('custom-timeout').checked;
             const timeout = customTimeout ? parseInt(document.getElementById('timeout-value').value) : null;
-            const sleepMode = document.getElementById('add-sleep-mode').value;
+            const autoPorts = document.getElementById('auto-ports').checked;
             
-            await api('/api/add_container', {method:'POST', headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({name, ports, idle_timeout: timeout, sleep_mode: sleepMode})});
+            let count = 0;
+            for (const name of selected) {
+                let ports;
+                if (autoPorts) {
+                    try {
+                        ports = await api(`/api/ports/${name}`);
+                    } catch(e) {
+                        console.warn(`获取 ${name} 端口失败:`, e);
+                        continue;
+                    }
+                } else {
+                    ports = [];
+                    document.querySelectorAll('#ports-list .port-tag').forEach(tag => {
+                        const m = tag.textContent.match(/^(\d+)\/(\w+)/);
+                        if (m) ports.push({port: parseInt(m[1]), proto: m[2]});
+                    });
+                }
+                
+                if (!ports.length) continue;
+                
+                await api('/api/add_container', {method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({name, ports, idle_timeout: timeout, sleep_mode: sleepMode})});
+                count++;
+            }
             
             closeAddModal();
             fetchStatus();
-            showToast(i18nData['added'] || '已添加', 'success');
+            showToast(`已添加 ${count} 个容器`, 'success');
         }
         
         // Settings Modal
