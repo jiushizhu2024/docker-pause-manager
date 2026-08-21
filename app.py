@@ -677,6 +677,37 @@ def api_remove_container():
 
     return jsonify({"success": True})
 
+
+@app.route("/api/remove_containers_batch", methods=["POST"])
+@token_required
+def api_remove_containers_batch():
+    """批量移除容器"""
+    data = request.get_json()
+    names = data.get("names", [])
+    if not names:
+        return jsonify({"error": "容器名列表不能为空"}), 400
+
+    for container_name in names:
+        container = get_container(container_name)
+        if container:
+            if container.status == "paused":
+                unpause_container(container_name)
+            elif container.status == "exited":
+                start_container(container_name)
+        if container_name in MONITORED_CONTAINERS:
+            del MONITORED_CONTAINERS[container_name]
+        if container_name in monitor.container_states:
+            del monitor.container_states[container_name]
+
+    save_config({"admin_password": ADMIN_PASSWORD_HASH, "idle_timeout": DEFAULT_IDLE_TIMEOUT,
+                 "check_interval": CHECK_INTERVAL, "net_interface": NETWORK_INTERFACE,
+                 "theme": CONFIG.get("theme", "light"), "language": CONFIG.get("language", "zh-CN"),
+                 "containers": MONITORED_CONTAINERS})
+    init_packet_counter()
+    log.info(f"已批量移除 {len(names)} 个容器: {names}")
+    return jsonify({"success": True, "count": len(names)})
+
+
 @app.route("/api/edit_container", methods=["POST"])
 @token_required
 def api_edit_container():
@@ -853,7 +884,10 @@ def api_i18n(lang):
             "mode_pause": "暂停(保留内存)",
             "mode_stop": "停止(释放全部)",
             "stopped": "已停止",
-            "batch_hint": "按住 Ctrl 点击可多选"
+            "batch_hint": "按住 Ctrl 点击可多选",
+            "remove_selected": "删除选中",
+            "no_ports": "无端口",
+            "removed": "已移除"
         },
         "zh-TW": {
             "title": "Docker Pause Manager",
@@ -905,7 +939,10 @@ def api_i18n(lang):
             "mode_pause": "暫停(保留記憶體)",
             "mode_stop": "停止(釋放全部)",
             "stopped": "已停止",
-            "batch_hint": "按住 Ctrl 點擊可多選"
+            "batch_hint": "按住 Ctrl 點擊可多選",
+            "remove_selected": "刪除選中",
+            "no_ports": "無埠",
+            "removed": "已移除"
         },
         "en": {
             "title": "Docker Pause Manager",
@@ -957,7 +994,10 @@ def api_i18n(lang):
             "mode_pause": "Pause (keep memory)",
             "mode_stop": "Stop (release all)",
             "stopped": "Stopped",
-            "batch_hint": "Hold Ctrl to select multiple"
+            "batch_hint": "Hold Ctrl to select multiple",
+            "remove_selected": "Remove Selected",
+            "no_ports": "No ports",
+            "removed": "Removed"
         }
     }
     return jsonify(i18n.get(lang, i18n["en"]))
