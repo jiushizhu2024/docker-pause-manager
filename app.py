@@ -622,6 +622,14 @@ def api_add_container():
     if not container:
         return jsonify({"error": f"容器 {container_name} 不存在"}), 404
     
+    # 如果容器已暂停或停止，先唤醒再添加
+    if container.status == "paused":
+        unpause_container(container_name)
+        log.info(f"[{container_name}] 添加前已唤醒 (was paused)")
+    elif container.status == "exited":
+        start_container(container_name)
+        log.info(f"[{container_name}] 添加前已启动 (was stopped)")
+
     # 添加或更新配置
     cfg_entry = {
         "ports": ports,
@@ -729,6 +737,20 @@ def api_edit_container():
     container = get_container(container_name)
     if not container:
         return jsonify({"error": f"容器 {container_name} 不存在"}), 404
+
+    # 如果容器已暂停或停止，先唤醒再修改配置（避免睡眠模式切换后无法唤醒）
+    if container.status == "paused":
+        unpause_container(container_name)
+        log.info(f"[{container_name}] 编辑前已唤醒 (was paused)")
+        if container_name in monitor.container_states:
+            monitor.container_states[container_name]["is_paused_by_us"] = False
+            monitor.container_states[container_name]["idle_seconds"] = 0
+    elif container.status == "exited":
+        start_container(container_name)
+        log.info(f"[{container_name}] 编辑前已启动 (was stopped)")
+        if container_name in monitor.container_states:
+            monitor.container_states[container_name]["is_paused_by_us"] = False
+            monitor.container_states[container_name]["idle_seconds"] = 0
 
     # 更新配置
     MONITORED_CONTAINERS[container_name] = {
