@@ -16,13 +16,16 @@
 ## ✨ 项目特点
 
 - **双模式休眠**：支持 Pause（释放 CPU，保留内存）和 Stop（释放全部资源）两种模式，按容器单独配置
-- **智能休眠**：基于真实网络流量检测，而非端口扫描，准确率高
+- **智能休眠**：基于真实网络流量检测（AF_PACKET + iptables 双重检测），准确率高
 - **自动唤醒**：检测到访问请求后瞬间唤醒，用户无感知
 - **Stop 模式无缝唤醒**：通过 iptables DROP 规则拦截 SYN 包，使客户端 TCP 自动重传，容器启动后重传成功
+- **批量操作**：支持批量添加容器、批量删除容器，添加时自动检测端口
+- **搜索过滤**：容器列表支持实时搜索，快速定位目标容器
 - **多端口支持**：支持 TCP/UDP 多端口容器（如媒体服务器）
-- **Web UI**：简洁易用的管理界面，支持中/英/繁体
-- **高亮对比度**：亮色/暗色主题，适合各种使用环境
-- **安全认证**：管理员密码保护，防止未授权访问
+- **Web UI**：简洁易用的管理界面，支持中/英/繁体三语切换
+- **亮色/暗色主题**：高对比度，适合各种使用环境
+- **安全认证**：管理员密码 SHA-256 哈希加密存储，防止未授权访问
+- **自动 CI/CD**：GitHub Actions 自动构建多架构镜像（amd64/arm64）
 
 ## 🚀 优势
 
@@ -34,6 +37,7 @@
 | **低开销** | 使用 AF_PACKET 原始套接字，性能优于 iptables |
 | **即插即用** | 一行 docker-compose.yml 即可部署 |
 | **持久化配置** | 配置保存在 `config.json`，容器重启不丢失 |
+| **密码加密** | SHA-256 哈希存储，不存明文 |
 
 ## 🔄 两种休眠模式对比
 
@@ -51,7 +55,7 @@
 Stop 后容器端口关闭，客户端会收到 `connection refused`。解决方案：
 1. **stop 前**：为每个 TCP 端口添加 `iptables -I INPUT -p tcp --dport <port> -j DROP`
 2. **DROP 效果**：SYN 包被静默丢弃，客户端 TCP 自动重传（而非收到 RST 报错）
-3. **AF_PACKET 仍能捕获**：DROP 在 INPUT 链生效，包已经到达网卡，嗅探不受影响
+3. **双重检测**：AF_PACKET 嗅探 + iptables DROP 规则命中计数，确保可靠唤醒
 4. **检测到流量** → `docker start` → 移除 DROP 规则 → 客户端重传成功
 
 ## 📋 docker-compose.yml 详解
@@ -79,7 +83,8 @@ services:
 
 `network_mode: host` 是必需的，原因：
 1. **AF_PACKET 包嗅探**：需要监听所有网络流量，host 网络才能捕获宿主机流量
-2. **容器直通**：容器可以直接使用宿主机网络接口
+2. **iptables 规则**：Stop 模式需要直接操作宿主机 iptables
+3. **容器直通**：容器可以直接使用宿主机网络接口
 
 > **注意**：host 模式下不能使用 `ports` 映射，端口通过 `LISTEN_PORT` 环境变量配置。
 
@@ -164,6 +169,8 @@ environment:
 
 **初始管理员密码**: `admin123`
 
+密码使用 SHA-256 哈希加密存储，配置文件中不保存明文。首次启动时如果检测到旧版明文密码，会自动转换为哈希。
+
 首次登录后请立即修改密码：
 1. 点击右上角「设置」按钮
 2. 在「修改管理密码」区域输入当前密码和新密码
@@ -191,6 +198,56 @@ environment:
 
 每个容器可以独立配置不同的休眠模式。
 
+### 添加和编辑容器
+
+- **添加容器**：支持多选批量添加，自动检测每个容器的端口，容器名称旁显示端口协议和端口号（如 `tcp:1101、1303 udp:2204`）
+- **编辑容器**：修改已休眠容器的睡眠模式时会自动先唤醒容器，确保状态一致
+- **搜索过滤**：容器列表上方有搜索框，实时过滤
+- **批量删除**：通过复选框选中多个容器后一键删除
+
+## 📜 更新日志
+
+### v1.4.0（2026-08-21）
+- **修复**：已休眠容器修改睡眠模式后无法唤醒的问题（编辑前自动唤醒）
+- **修复**：添加已休眠容器时状态不一致的问题（添加前自动唤醒）
+- **修复**：Stop 模式容器唤醒失败（增加 iptables DROP 规则命中计数检测）
+- **修复**：事件队列竞态条件导致唤醒丢失
+
+### v1.3.0（2026-08-21）
+- **新增**：批量添加容器（多选 + 自动检测端口）
+- **新增**：批量删除容器（复选框 + 一键删除）
+- **新增**：容器列表搜索框（实时过滤）
+- **新增**：添加容器对话框中显示端口协议和端口号
+- **新增**：密码 SHA-256 哈希加密存储
+- **修复**：`deleteText` 未定义导致容器列表不显示
+
+### v1.2.0（2026-08-21）
+- **新增**：Stop 模式（释放全部资源包括内存）
+- **新增**：iptables DROP 规则拦截 SYN，实现 Stop 模式无缝唤醒
+- **新增**：睡眠模式选择器（Pause/Stop）
+- **新增**：容器列表显示模式列
+- **新增**：停止/唤醒按钮根据模式自动切换
+
+### v1.1.0（2026-08-20）
+- **新增**：GitHub Actions 自动构建多架构镜像（amd64/arm64）
+- **新增**：Dockerfile 和 requirements.txt
+- **新增**：繁体中文版 README
+- **新增**：默认密码说明
+- **新增**：Star 请求
+
+### v1.0.0（2026-08-15）
+- **初始版本**
+- AF_PACKET 包嗅探检测容器流量
+- Pause/Unpause 自动休眠和唤醒
+- 事件驱动唤醒（检测到流量立即唤醒）
+- Web UI 管理界面
+- 管理员密码登录认证
+- 多端口容器支持
+- 多语言支持（简体中文/繁体中文/英文）
+- 亮色/暗色主题
+- 容器编辑功能（端口、空闲超时）
+- 全局设置（主题、语言、空闲超时、检查间隔）
+
 ---
 
 **如果觉得好用，欢迎点个 Star，感谢支持！⭐**
@@ -207,13 +264,16 @@ environment:
 ## ✨ 專案特點
 
 - **雙模式休眠**：支援 Pause（釋放 CPU，保留記憶體）和 Stop（釋放全部資源）兩種模式，按容器單獨配置
-- **智慧休眠**：基於真實網路流量檢測，而非埠掃描，準確率高
+- **智慧休眠**：基於真實網路流量檢測（AF_PACKET + iptables 雙重檢測），準確率高
 - **自動喚醒**：偵測到訪問請求後瞬間喚醒，用戶無感知
 - **Stop 模式無縫喚醒**：透過 iptables DROP 規則攔截 SYN 封包，使客戶端 TCP 自動重傳，容器啟動後重傳成功
+- **批次操作**：支援批次新增容器、批次刪除容器，新增時自動偵測埠
+- **搜尋過濾**：容器列表支援即時搜尋，快速定位目標容器
 - **多埠支援**：支援 TCP/UDP 多埠容器（如媒體伺服器）
-- **Web UI**：簡潔易用的管理介面，支援中/英/繁體
-- **高對比度**：亮色/暗色主題，適合各種使用環境
-- **安全認證**：管理員密碼保護，防止未授權訪問
+- **Web UI**：簡潔易用的管理介面，支援中/英/繁體三語切換
+- **亮色/暗色主題**：高對比度，適合各種使用環境
+- **安全認證**：管理員密碼 SHA-256 雜湊加密儲存，防止未授權訪問
+- **自動 CI/CD**：GitHub Actions 自動建構多架構映像（amd64/arm64）
 
 ## 🚀 優勢
 
@@ -225,6 +285,7 @@ environment:
 | **低開銷** | 使用 AF_PACKET 原始套接字，效能優於 iptables |
 | **即插即用** | 一行 docker-compose.yml 即可部署 |
 | **持久化配置** | 配置保存在 `config.json`，容器重啟不丟失 |
+| **密碼加密** | SHA-256 雜湊儲存，不存明文 |
 
 ## 🔄 兩種休眠模式對比
 
@@ -242,7 +303,7 @@ environment:
 Stop 後容器埠關閉，客戶端會收到 `connection refused`。解決方案：
 1. **stop 前**：為每個 TCP 埠新增 `iptables -I INPUT -p tcp --dport <port> -j DROP`
 2. **DROP 效果**：SYN 封包被靜默丟棄，客戶端 TCP 自動重傳（而非收到 RST 報錯）
-3. **AF_PACKET 仍能捕獲**：DROP 在 INPUT 鏈生效，封包已經到達網卡，嗅探不受影響
+3. **雙重檢測**：AF_PACKET 嗅探 + iptables DROP 規則命中計數，確保可靠喚醒
 4. **偵測到流量** → `docker start` → 移除 DROP 規則 → 客戶端重傳成功
 
 ## 📋 docker-compose.yml 詳解
@@ -270,7 +331,8 @@ services:
 
 `network_mode: host` 是必需的，原因：
 1. **AF_PACKET 包嗅探**：需要監聽所有網路流量，host 網路才能捕獲宿主機流量
-2. **容器直通**：容器可以直接使用宿主機網路介面
+2. **iptables 規則**：Stop 模式需要直接操作宿主機 iptables
+3. **容器直通**：容器可以直接使用宿主機網路介面
 
 > **注意**：host 模式下不能使用 `ports` 映射，埠透過 `LISTEN_PORT` 環境變數配置。
 
@@ -355,6 +417,8 @@ environment:
 
 **初始管理員密碼**: `admin123`
 
+密碼使用 SHA-256 雜湊加密儲存，配置檔案中不保存明文。首次啟動時如果偵測到舊版明文密碼，會自動轉換為雜湊。
+
 首次登入後請立即修改密碼：
 1. 點擊右上角「設定」按鈕
 2. 在「修改管理密碼」區域輸入當前密碼和新密碼
@@ -382,6 +446,56 @@ environment:
 
 每個容器可以獨立配置不同的休眠模式。
 
+### 新增和編輯容器
+
+- **新增容器**：支援多選批次新增，自動偵測每個容器的埠，容器名稱旁顯示埠協定和埠號（如 `tcp:1101、1303 udp:2204`）
+- **編輯容器**：修改已休眠容器的睡眠模式時會自動先喚醒容器，確保狀態一致
+- **搜尋過濾**：容器列表上方有搜尋框，即時過濾
+- **批次刪除**：透過核取方塊選取多個容器後一鍵刪除
+
+## 📜 更新日誌
+
+### v1.4.0（2026-08-21）
+- **修復**：已休眠容器修改睡眠模式後無法喚醒的問題（編輯前自動喚醒）
+- **修復**：新增已休眠容器時狀態不一致的問題（新增前自動喚醒）
+- **修復**：Stop 模式容器喚醒失敗（增加 iptables DROP 規則命中計數偵測）
+- **修復**：事件佇列競態條件導致喚醒丟失
+
+### v1.3.0（2026-08-21）
+- **新增**：批次新增容器（多選 + 自動偵測埠）
+- **新增**：批次刪除容器（核取方塊 + 一鍵刪除）
+- **新增**：容器列表搜尋框（即時過濾）
+- **新增**：新增容器對話框中顯示埠協定和埠號
+- **新增**：密碼 SHA-256 雜湊加密儲存
+- **修復**：`deleteText` 未定義導致容器列表不顯示
+
+### v1.2.0（2026-08-21）
+- **新增**：Stop 模式（釋放全部資源包括記憶體）
+- **新增**：iptables DROP 規則攔截 SYN，實現 Stop 模式無縫喚醒
+- **新增**：睡眠模式選擇器（Pause/Stop）
+- **新增**：容器列表顯示模式列
+- **新增**：停止/喚醒按鈕根據模式自動切換
+
+### v1.1.0（2026-08-20）
+- **新增**：GitHub Actions 自動建構多架構映像（amd64/arm64）
+- **新增**：Dockerfile 和 requirements.txt
+- **新增**：繁體中文版 README
+- **新增**：預設密碼說明
+- **新增**：Star 請求
+
+### v1.0.0（2026-08-15）
+- **初始版本**
+- AF_PACKET 封包嗅探偵測容器流量
+- Pause/Unpause 自動休眠和喚醒
+- 事件驅動喚醒（偵測到流量立即喚醒）
+- Web UI 管理介面
+- 管理員密碼登入認證
+- 多埠容器支援
+- 多語言支援（簡體中文/繁體中文/英文）
+- 亮色/暗色主題
+- 容器編輯功能（埠、閒置超時）
+- 全域設定（主題、語言、閒置超時、檢查間隔）
+
 ---
 
 **如果覺得好用，歡迎點個 Star，感謝支持！⭐**
@@ -398,13 +512,16 @@ Docker container auto-sleep manager based on AF_PACKET packet sniffing. Automati
 ## ✨ Features
 
 - **Dual Sleep Modes**: Supports Pause (release CPU, keep memory) and Stop (release all resources) modes, configurable per container
-- **Smart Sleep Detection**: Based on real network traffic analysis, high accuracy
+- **Smart Sleep Detection**: Based on real network traffic analysis (AF_PACKET + iptables dual detection), high accuracy
 - **Instant Wake-up**: Automatically wakes when access is detected, transparent to users
 - **Stop Mode Seamless Wake-up**: Uses iptables DROP rules to intercept SYN packets, causing client TCP to auto-retransmit, succeeding after container starts
+- **Batch Operations**: Batch add containers, batch delete containers, auto-detect ports on add
+- **Search Filter**: Real-time search in container lists, quick filtering
 - **Multi-port Support**: Supports containers with multiple TCP/UDP ports
 - **Web UI**: Clean and intuitive management interface, supports CN/EN/Traditional Chinese
-- **High Contrast UI**: Light/dark themes for various environments
-- **Secure Authentication**: Admin password protection
+- **Light/Dark Theme**: High contrast, suitable for various environments
+- **Secure Authentication**: Admin password stored as SHA-256 hash, prevents unauthorized access
+- **Auto CI/CD**: GitHub Actions auto-builds multi-arch images (amd64/arm64)
 
 ## 🚀 Advantages
 
@@ -416,6 +533,7 @@ Docker container auto-sleep manager based on AF_PACKET packet sniffing. Automati
 | **Low Overhead** | Uses AF_PACKET raw sockets, better performance than iptables |
 | **Plug & Play** | One-line docker-compose.yml to deploy |
 | **Persistent Config** | Config saved to `config.json`, survives container restart |
+| **Password Encryption** | SHA-256 hash storage, no plaintext |
 
 ## 🔄 Sleep Mode Comparison
 
@@ -433,7 +551,7 @@ Docker container auto-sleep manager based on AF_PACKET packet sniffing. Automati
 After stop, container ports close and clients get `connection refused`. Solution:
 1. **Before stop**: Add `iptables -I INPUT -p tcp --dport <port> -j DROP` for each TCP port
 2. **DROP effect**: SYN packets silently dropped, client TCP auto-retransmits (instead of getting RST error)
-3. **AF_PACKET still captures**: DROP is on INPUT chain, packets already reached NIC, sniffing unaffected
+3. **Dual detection**: AF_PACKET sniffing + iptables DROP rule hit count, ensuring reliable wake-up
 4. **Traffic detected** → `docker start` → remove DROP rules → client retransmission succeeds
 
 ## 📋 docker-compose.yml Explained
@@ -461,7 +579,8 @@ services:
 
 `network_mode: host` is required because:
 1. **AF_PACKET Sniffing**: Need to monitor all network traffic, host network can capture host traffic
-2. **Container Pass-through**: Container can directly use host network interfaces
+2. **iptables Rules**: Stop mode needs to directly manipulate host iptables
+3. **Container Pass-through**: Container can directly use host network interfaces
 
 > **Note**: Cannot use `ports` mapping in host mode. Port is configured via `LISTEN_PORT` environment variable.
 
@@ -546,6 +665,8 @@ environment:
 
 **Initial Admin Password**: `admin123`
 
+Password is stored as SHA-256 hash, no plaintext in config file. On first startup with old plaintext password, it auto-migrates to hash.
+
 Change password after first login:
 1. Click the Settings button (top right)
 2. In the "Change Password" section, enter current and new password
@@ -572,6 +693,56 @@ When adding or editing a container in the Web UI, you can select the sleep mode:
 - **Stop (release all)**: Stop mode, releases CPU + memory, second-level wake-up
 
 Each container can be independently configured with a different sleep mode.
+
+### Adding and Editing Containers
+
+- **Add Container**: Supports multi-select batch add, auto-detects ports per container, shows port protocol and number next to name (e.g. `tcp:1101,1303 udp:2204`)
+- **Edit Container**: Automatically wakes sleeping containers before changing sleep mode, ensuring consistent state
+- **Search Filter**: Search box above container list for real-time filtering
+- **Batch Delete**: Select multiple containers via checkboxes, one-click delete
+
+## 📜 Changelog
+
+### v1.4.0 (2026-08-21)
+- **Fix**: Sleeping containers couldn't wake up after changing sleep mode (auto-wake before edit)
+- **Fix**: Inconsistent state when adding already-sleeping containers (auto-wake before add)
+- **Fix**: Stop mode containers failed to wake up (added iptables DROP rule hit count detection)
+- **Fix**: Event queue race condition causing lost wake-ups
+
+### v1.3.0 (2026-08-21)
+- **Add**: Batch add containers (multi-select + auto port detection)
+- **Add**: Batch delete containers (checkboxes + one-click delete)
+- **Add**: Container list search box (real-time filtering)
+- **Add**: Port protocol and number display in add container dialog
+- **Add**: Password SHA-256 hash encryption storage
+- **Fix**: `deleteText` undefined causing empty container list
+
+### v1.2.0 (2026-08-21)
+- **Add**: Stop mode (release all resources including memory)
+- **Add**: iptables DROP rules to intercept SYN for seamless Stop mode wake-up
+- **Add**: Sleep mode selector (Pause/Stop)
+- **Add**: Mode column in container list
+- **Add**: Stop/Wake buttons auto-switch based on mode
+
+### v1.1.0 (2026-08-20)
+- **Add**: GitHub Actions auto-build multi-arch images (amd64/arm64)
+- **Add**: Dockerfile and requirements.txt
+- **Add**: Traditional Chinese README
+- **Add**: Default password documentation
+- **Add**: Star request
+
+### v1.0.0 (2026-08-15)
+- **Initial release**
+- AF_PACKET packet sniffing for container traffic detection
+- Pause/Unpause automatic sleep and wake-up
+- Event-driven wake-up (instant wake on traffic detection)
+- Web UI management interface
+- Admin password login authentication
+- Multi-port container support
+- Multi-language support (Simplified Chinese/Traditional Chinese/English)
+- Light/dark theme
+- Container editing (ports, idle timeout)
+- Global settings (theme, language, idle timeout, check interval)
 
 ---
 
