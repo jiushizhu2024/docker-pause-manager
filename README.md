@@ -11,14 +11,14 @@
 
 # Docker Pause Manager
 
-基于 AF_PACKET 包嗅探的 Docker 容器自动休眠管理器。当容器在设定时间内没有网络流量时自动休眠释放资源，有访问时自动唤醒。支持 **Pause 模式**（释放 CPU，保留内存）和 **Stop 模式**（释放全部资源包括内存）。
+基于 iptables DROP 规则命中计数（辅以 AF_PACKET 包嗅探）的 Docker 容器自动休眠管理器。当容器在设定时间内没有网络流量时自动休眠释放资源，有访问时自动唤醒。支持 **Pause 模式**（释放 CPU，保留内存）和 **Stop 模式**（释放全部资源包括内存）。
 
 ## ✨ 项目特点
 
 - **双模式休眠**：支持 Pause（释放 CPU，保留内存）和 Stop（释放全部资源）两种模式，按容器单独配置
-- **智能休眠**：基于真实网络流量检测（AF_PACKET + iptables 双重检测），准确率高
+- **智能休眠**：基于真实网络流量检测（iptables DROP 规则命中计数为主，AF_PACKET 嗅探为辅），准确率高
 - **自动唤醒**：检测到访问请求后瞬间唤醒，用户无感知
-- **Stop 模式无缝唤醒**：通过 iptables DROP 规则拦截 SYN 包，使客户端 TCP 自动重传，容器启动后重传成功
+- **Pause / Stop 模式均可无缝唤醒**：两种模式休眠时都为容器端口写入 iptables DROP 规则拦截 SYN，客户端 TCP 自动重传，唤醒后重传成功
 - **批量操作**：支持批量添加容器、批量删除容器，添加时自动检测端口
 - **搜索过滤**：容器列表支持实时搜索，快速定位目标容器
 - **多端口支持**：支持 TCP/UDP 多端口容器（如媒体服务器）
@@ -34,8 +34,7 @@
 | **资源节约** | 闲置容器释放 CPU 和内存，降低主机负载 |
 | **双模式灵活选择** | Pause 模式毫秒级唤醒；Stop 模式彻底释放内存 |
 | **无需修改容器** | 监听宿主机网络接口，容器本身无需修改 |
-| **低开销** | 使用 AF_PACKET 原始套接字，性能优于 iptables |
-| **即插即用** | 一行 docker-compose.yml 即可部署 |
+| **双模式可靠唤醒** | Pause / Stop 模式均通过 iptables DROP 命中计数检测流量，不受背景流量干扰 |
 | **持久化配置** | 配置保存在 `config.json`，容器重启不丢失 |
 | **密码加密** | SHA-256 哈希存储，不存明文 |
 
@@ -57,6 +56,14 @@ Stop 后容器端口关闭，客户端会收到 `connection refused`。解决方
 2. **DROP 效果**：SYN 包被静默丢弃，客户端 TCP 自动重传（而非收到 RST 报错）
 3. **双重检测**：AF_PACKET 嗅探 + iptables DROP 规则命中计数，确保可靠唤醒
 4. **检测到流量** → `docker start` → 移除 DROP 规则 → 客户端重传成功
+
+### Pause 模式工作原理（v1.5.0 起）
+
+早期版本 Pause 模式只依赖 AF_PACKET 原始套接字嗅探唤醒，在背景流量大（raw socket 接收队列溢出）时会漏包导致无法唤醒。v1.5.0 起改为与 Stop 模式相同的可靠机制：
+1. **pause 前**：同样为每个 TCP 端口写入 `iptables -I INPUT -p tcp --dport <port> -j DROP`
+2. **paused 状态下**：容器端口不可达，SYN 被 DROP 规则拦截，客户端持续重传
+3. **检测到流量**：轮询器发现该容器端口的 DROP 规则命中计数增长 → `docker unpause` → 移除 DROP 规则
+4. 唤醒后 1 秒内客户端重传即可连通；事件嗅探队列保留作为辅助路径
 
 ## 📋 docker-compose.yml 详解
 
@@ -207,6 +214,12 @@ environment:
 
 ## 📜 更新日志
 
+### v1.5.0（2026-08-15）
+- **修复**：Pause 模式容器无法被网络访问唤醒的问题（Pause 模式同样写入 iptables DROP 规则，使客户端 SYN 包触发命中计数后自动唤醒，与 Stop 模式机制一致）
+- **修复**：唤醒（unpause）后残留的 iptables DROP 规则自动移除
+- **修复**：事件轮询检测器补充 `paused` 状态的 Pause 模式容器，不再只处理 `exited` 状态的 Stop 模式容器
+- **新增**：`_add_iptables_drop_rules()` / `_remove_iptables_drop_rules()` 通用工具函数（Stop 和 Pause 模式共用）
+
 ### v1.4.0（2026-08-21）
 - **修复**：已休眠容器修改睡眠模式后无法唤醒的问题（编辑前自动唤醒）
 - **修复**：添加已休眠容器时状态不一致的问题（添加前自动唤醒）
@@ -259,14 +272,14 @@ environment:
 
 # Docker Pause Manager
 
-基於 AF_PACKET 包嗅探的 Docker 容器自動休眠管理器。當容器在設定時間內沒有網路流量時自動休眠釋放資源，有訪問時自動喚醒。支援 **Pause 模式**（釋放 CPU，保留記憶體）和 **Stop 模式**（釋放全部資源包括記憶體）。
+基於 iptables DROP 規則命中計數（輔以 AF_PACKET 封包嗅探）的 Docker 容器自動休眠管理器。當容器在設定時間內沒有網路流量時自動休眠釋放資源，有訪問時自動喚醒。支援 **Pause 模式**（釋放 CPU，保留記憶體）和 **Stop 模式**（釋放全部資源包括記憶體）。
 
 ## ✨ 專案特點
 
 - **雙模式休眠**：支援 Pause（釋放 CPU，保留記憶體）和 Stop（釋放全部資源）兩種模式，按容器單獨配置
-- **智慧休眠**：基於真實網路流量檢測（AF_PACKET + iptables 雙重檢測），準確率高
+- **智慧休眠**：基於真實網路流量檢測（iptables DROP 命中計數為主，AF_PACKET 嗅探為輔），準確率高
 - **自動喚醒**：偵測到訪問請求後瞬間喚醒，用戶無感知
-- **Stop 模式無縫喚醒**：透過 iptables DROP 規則攔截 SYN 封包，使客戶端 TCP 自動重傳，容器啟動後重傳成功
+- **Pause / Stop 模式均可無縫喚醒**：兩種模式休眠時都為容器埠寫入 iptables DROP 規則攔截 SYN，客戶端 TCP 自動重傳，喚醒後重傳成功
 - **批次操作**：支援批次新增容器、批次刪除容器，新增時自動偵測埠
 - **搜尋過濾**：容器列表支援即時搜尋，快速定位目標容器
 - **多埠支援**：支援 TCP/UDP 多埠容器（如媒體伺服器）
@@ -305,6 +318,14 @@ Stop 後容器埠關閉，客戶端會收到 `connection refused`。解決方案
 2. **DROP 效果**：SYN 封包被靜默丟棄，客戶端 TCP 自動重傳（而非收到 RST 報錯）
 3. **雙重檢測**：AF_PACKET 嗅探 + iptables DROP 規則命中計數，確保可靠喚醒
 4. **偵測到流量** → `docker start` → 移除 DROP 規則 → 客戶端重傳成功
+
+### Pause 模式工作原理（v1.5.0 起）
+
+早期版本 Pause 模式只依賴 AF_PACKET 原始套接字嗅探喚醒，在背景流量大（raw socket 接收佇列溢出）時會漏包導致無法喚醒。v1.5.0 起改為與 Stop 模式相同的可靠機制：
+1. **pause 前**：同樣為每個 TCP 埠寫入 `iptables -I INPUT -p tcp --dport <port> -j DROP`
+2. **paused 狀態下**：容器埠不可達，SYN 被 DROP 規則攔截，客戶端持續重傳
+3. **偵測到流量**：輪詢器發現該容器埠的 DROP 規則命中計數增長 → `docker unpause` → 移除 DROP 規則
+4. 喚醒後 1 秒內客戶端重傳即可連線；事件嗅探佇列保留作為輔助路徑
 
 ## 📋 docker-compose.yml 詳解
 
@@ -455,6 +476,12 @@ environment:
 
 ## 📜 更新日誌
 
+### v1.5.0（2026-08-15）
+- **修復**：Pause 模式容器無法被網路訪問喚醒的問題（Pause 模式同樣寫入 iptables DROP 規則，使客戶端 SYN 封包觸發命中計數後自動喚醒，與 Stop 模式機制一致）
+- **修復**：喚醒（unpause）後殘留的 iptables DROP 規則自動移除
+- **修復**：事件輪詢偵測器補充 `paused` 狀態的 Pause 模式容器，不再只處理 `exited` 狀態的 Stop 模式容器
+- **新增**：`_add_iptables_drop_rules()` / `_remove_iptables_drop_rules()` 通用工具函數（Stop 和 Pause 模式共用）
+
 ### v1.4.0（2026-08-21）
 - **修復**：已休眠容器修改睡眠模式後無法喚醒的問題（編輯前自動喚醒）
 - **修復**：新增已休眠容器時狀態不一致的問題（新增前自動喚醒）
@@ -507,14 +534,14 @@ environment:
 
 # Docker Pause Manager
 
-Docker container auto-sleep manager based on AF_PACKET packet sniffing. Automatically sleeps containers with no network traffic for a set time, and wakes them on demand. Supports **Pause mode** (release CPU, keep memory) and **Stop mode** (release all resources including memory).
+Docker container auto-sleep manager based on iptables DROP rule hit counting (supplemented by AF_PACKET packet sniffing). Automatically sleeps containers with no network traffic for a set time, and wakes them on demand. Supports **Pause mode** (release CPU, keep memory) and **Stop mode** (release all resources including memory).
 
 ## ✨ Features
 
 - **Dual Sleep Modes**: Supports Pause (release CPU, keep memory) and Stop (release all resources) modes, configurable per container
-- **Smart Sleep Detection**: Based on real network traffic analysis (AF_PACKET + iptables dual detection), high accuracy
+- **Smart Sleep Detection**: Based on real network traffic analysis (iptables DROP hit count as primary, AF_PACKET sniffing as auxiliary), high accuracy
 - **Instant Wake-up**: Automatically wakes when access is detected, transparent to users
-- **Stop Mode Seamless Wake-up**: Uses iptables DROP rules to intercept SYN packets, causing client TCP to auto-retransmit, succeeding after container starts
+- **Seamless Wake-up for Both Pause & Stop Modes**: Both modes write iptables DROP rules for the container's ports while sleeping, intercepting SYNs so client TCP auto-retransmits; connection succeeds after wake-up
 - **Batch Operations**: Batch add containers, batch delete containers, auto-detect ports on add
 - **Search Filter**: Real-time search in container lists, quick filtering
 - **Multi-port Support**: Supports containers with multiple TCP/UDP ports
@@ -553,6 +580,14 @@ After stop, container ports close and clients get `connection refused`. Solution
 2. **DROP effect**: SYN packets silently dropped, client TCP auto-retransmits (instead of getting RST error)
 3. **Dual detection**: AF_PACKET sniffing + iptables DROP rule hit count, ensuring reliable wake-up
 4. **Traffic detected** → `docker start` → remove DROP rules → client retransmission succeeds
+
+### Pause Mode Technical Details (since v1.5.0)
+
+Early versions of Pause mode relied solely on AF_PACKET raw-socket sniffing for wake-up, which misses packets under heavy background traffic (raw socket RX queue overflow) and can leave containers permanently asleep. Since v1.5.0, Pause mode uses the same reliable mechanism as Stop mode:
+1. **Before pause**: Write `iptables -I INPUT -p tcp --dport <port> -j DROP` for each TCP port
+2. **While paused**: Container ports are unreachable; SYNs are intercepted by the DROP rules and clients keep retransmitting
+3. **Traffic detected**: The poller notices the DROP rule's hit counter increasing for this container's port → `docker unpause` → remove the DROP rules
+4. Clients connect via retransmission within ~1 second of wake-up; the event sniffing queue is kept as an auxiliary path
 
 ## 📋 docker-compose.yml Explained
 
@@ -702,6 +737,12 @@ Each container can be independently configured with a different sleep mode.
 - **Batch Delete**: Select multiple containers via checkboxes, one-click delete
 
 ## 📜 Changelog
+
+### v1.5.0 (2026-08-15)
+- **Fix**: Pause mode containers could not be woken up by network access (pause mode now also writes iptables DROP rules, so client SYNs trigger hit counts and auto-wake, consistent with Stop mode)
+- **Fix**: Residual iptables DROP rules are now removed automatically after unpause
+- **Fix**: Poll-based detector now handles `paused` Pause-mode containers, not only `exited` Stop-mode containers
+- **Add**: `_add_iptables_drop_rules()` / `_remove_iptables_drop_rules()` shared helper functions (used by both Stop and Pause modes)
 
 ### v1.4.0 (2026-08-21)
 - **Fix**: Sleeping containers couldn't wake up after changing sleep mode (auto-wake before edit)

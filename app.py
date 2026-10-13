@@ -103,12 +103,56 @@ def get_container_ports(container_name):
         log.error(f"获取容器端口失败 {container_name}: {e}")
         return []
 
+def _add_iptables_drop_rules(container_name):
+    """为容器每个 TCP 端口添加 iptables DROP 规则，拦截 SYN 使客户端重传并触发计数"""
+    try:
+        ports = get_container_ports(container_name)
+        for port_info in ports:
+            port = port_info.get("port", 0)
+            proto = port_info.get("proto", "tcp")
+            if proto == "tcp" and port:
+                try:
+                    subprocess.run(
+                        ["iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(port),
+                         "-j", "DROP"],
+                        capture_output=True, timeout=5
+                    )
+                    log.info(f"[{container_name}] iptables DROP 规则已添加 (port {port}/tcp)")
+                except Exception as e:
+                    log.warning(f"[{container_name}] iptables 规则添加失败 (port {port}): {e}")
+    except Exception as e:
+        log.error(f"[{container_name}] 获取端口失败: {e}")
+
+def _remove_iptables_drop_rules(container_name):
+    """移除容器所有 TCP 端口的 iptables DROP 规则，并清除计数跟踪"""
+    global _iptables_drop_counts
+    try:
+        ports = get_container_ports(container_name)
+        for port_info in ports:
+            port = port_info.get("port", 0)
+            proto = port_info.get("proto", "tcp")
+            if proto == "tcp" and port:
+                try:
+                    subprocess.run(
+                        ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
+                         "-j", "DROP"],
+                        capture_output=True, timeout=5
+                    )
+                    log.info(f"[{container_name}] iptables DROP 规则已移除 (port {port}/tcp)")
+                    _iptables_drop_counts.pop(f"{container_name}:{port}", None)
+                except Exception:
+                    pass
+    except Exception as e:
+        log.error(f"[{container_name}] 获取端口失败: {e}")
+
 def pause_container(container_name):
     container = get_container(container_name)
     if container and container.status == "running":
         try:
             container.pause()
             log.info(f"[{container_name}] 已暂停 (pause)")
+            # 暂停后同样加 iptables DROP 规则，走可靠的计数器唤醒路径（与 stop 模式一致）
+            _add_iptables_drop_rules(container_name)
             return True
         except Exception as e:
             log.error(f"[{container_name}] 暂停失败: {e}")
@@ -121,6 +165,8 @@ def unpause_container(container_name):
         try:
             container.unpause()
             log.info(f"[{container_name}] 已唤醒 (unpause)")
+            # 唤醒后移除 iptables DROP 规则，恢复端口可达
+            _remove_iptables_drop_rules(container_name)
             return True
         except Exception as e:
             log.error(f"[{container_name}] 唤醒失败: {e}")
@@ -1195,16 +1241,24 @@ def event_handler_loop():
         except Exception as e:
             log.error(f"[事件处理] 异常: {e}")
         
-        # 额外检查：所有 exited 容器也通过 iptables 规则检测
+        # 额外检查：所有休眠容器（exited=stop / paused=pause）也通过 iptables 规则检测
         try:
             for name, state in list(monitor.container_states.items()):
                 if state.get("is_paused_by_us", False):
                     container = get_container(name)
-                    if container and container.status == "exited":
+                    if container:
                         sleep_mode = state.get("sleep_mode", "pause")
-                        if sleep_mode == "stop" and has_new_connection(name, state.get("ports", [])):
+                        if container.status == "exited" and sleep_mode == "stop" \
+                                and has_new_connection(name, state.get("ports", [])):
                             log.info(f"[iptables 轮询] [{name}] 检测到流量，启动容器")
                             start_container(name)
+                            state["idle_seconds"] = 0
+                            state["is_paused_by_us"] = False
+                            monitor._save_state()
+                        elif container.status == "paused" and sleep_mode == "pause" \
+                                and has_new_connection(name, state.get("ports", [])):
+                            log.info(f"[iptables 轮询] [{name}] 检测到流量，唤醒容器")
+                            unpause_container(name)
                             state["idle_seconds"] = 0
                             state["is_paused_by_us"] = False
                             monitor._save_state()

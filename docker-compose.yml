@@ -1,16 +1,22 @@
 services:
   docker-pause-manager:
+    # 官方多架构镜像（GitHub Actions 自动构建 amd64/arm64）。
+    # 若上游镜像源限流（429 Too Many Requests），可在本地基于旧镜像仅覆盖 app.py 构建
+    # `docker-pause-manager:local`，并把 image 行临时改为该本地 tag。见 README「部署步骤」。
     image: ghcr.io/jiushizhu2024/docker-pause-manager:latest
     container_name: docker-pause-manager
     restart: unless-stopped
-    network_mode: host
+    network_mode: host            # 必需：监听宿主机网络接口以捕获流量（AF_PACKET + iptables）
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock   # 操作 Docker 容器
+      # 数据持久化：配置与运行状态挂载到宿主目录，容器重建不丢失
+      - /volume1/docker/docker-pause-manager/config.json:/app/config.json
+      - /volume1/docker/docker-pause-manager/state.json:/app/state.json
     environment:
       - CONFIG_PATH=/app/config.json
       - STATE_PATH=/app/state.json
       - LISTEN_HOST=0.0.0.0
       - LISTEN_PORT=5287
     cap_add:
-      - NET_ADMIN
-      - NET_RAW
+      - NET_ADMIN   # 操作 iptables DROP 规则
+      - NET_RAW     # AF_PACKET 原始套接字嗅探
