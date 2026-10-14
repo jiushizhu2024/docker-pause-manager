@@ -142,12 +142,16 @@
         .toolbar .search-box { flex: 1; margin-bottom: 0; min-width: 150px; }
         .sel-count { font-size: 13px; color: var(--text-muted); }
         .full-width { grid-column: 1 / -1; }
+        .app-version { font-size: 12px; color: var(--text-muted); background: var(--bg-card);
+            border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px;
+            margin-left: 10px; vertical-align: middle; font-weight: 500; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>
             <span data-i18n="title">Docker Pause Manager</span>
+            <span id="app-version" class="app-version"></span>
             <div class="btn-group">
                 <button class="btn btn-sm btn-primary" onclick="showSettings()">⚙️ <span data-i18n="settings">设置</span></button>
                 <button class="btn btn-sm btn-primary" onclick="showAddModal()">+ <span data-i18n="add_container">添加容器</span></button>
@@ -411,6 +415,7 @@
             try {
                 const s = await api('/api/settings');
                 if (s && s.theme) { currentTheme = s.theme; applyTheme(); }
+                if (s && s.version) { document.getElementById('app-version').textContent = 'v' + s.version; }
                 serverThemeLoaded = true;
             } catch(e) { /* 保持本地主题 */ }
         }

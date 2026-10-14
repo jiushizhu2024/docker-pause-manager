@@ -272,8 +272,9 @@ DEFAULT_CONFIG = {
     "containers": {}
 }
 
-LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
+LISTEN_HOST = os.environ.get("LISTEN_HOST", "IP#19e362")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "5287"))
+APP_VERSION = "1.5.1"
 JWT_SECRET = secrets.token_hex(32)
 JWT_ALGORITHM = "HS256"
 JWT_EXP_HOURS = 24
@@ -824,6 +825,7 @@ def api_settings():
     
     if request.method == "GET":
         return jsonify({
+            "version": APP_VERSION,
             "idle_timeout": DEFAULT_IDLE_TIMEOUT,
             "check_interval": CHECK_INTERVAL,
             "net_interface": NETWORK_INTERFACE,
