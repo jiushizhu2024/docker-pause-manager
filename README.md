@@ -214,6 +214,12 @@ environment:
 
 ## 📜 更新日志
 
+### v1.5.1（2026-08-15）
+- **修复**：DPM 监控容器在闲置停止/暂停后，**应用自身崩溃退出**时无法被网络访问唤醒的问题（此前仅对 DPM 主动停止的容器挂 iptables DROP 唤醒规则；自行崩溃的容器没有 DROP 规则，访问只会连接被拒）。现 DPM 会接管这类 `exited` / 非 DPM `paused` 容器，自动挂上 DROP 规则，使网络访问即可唤醒
+- **修复**：唤醒方式改为按**实际容器状态**选择（崩溃退出用 `start`、暂停用 `unpause`），不再只看配置的 `sleep_mode`
+- **加固**：iptables DROP 规则操作改为**幂等**——插入前用 `iptables -C` 查重、移除时循环删除直至不存在，杜绝多路径接管导致的规则残留（残留会导致容器启动后端口仍被拦截）
+- **前端**：登录/已登录时从服务端同步主题，避免浏览器 localStorage 旧主题盖过服务端配置；亮色主题改为高对比度配色
+
 ### v1.5.0（2026-08-15）
 - **修复**：Pause 模式容器无法被网络访问唤醒的问题（Pause 模式同样写入 iptables DROP 规则，使客户端 SYN 包触发命中计数后自动唤醒，与 Stop 模式机制一致）
 - **修复**：唤醒（unpause）后残留的 iptables DROP 规则自动移除
@@ -476,6 +482,12 @@ environment:
 
 ## 📜 更新日誌
 
+### v1.5.1（2026-08-15）
+- **修復**：DPM 監控容器在閒置停止/暫停後，**應用自身崩潰退出**時無法被網路訪問喚醒的問題（此前僅對 DPM 主動停止的容器掛 iptables DROP 喚醒規則；自行崩潰的容器沒有 DROP 規則，訪問只會連線被拒）。現 DPM 會接管這類 `exited` / 非 DPM `paused` 容器，自動掛上 DROP 規則，使網路訪問即可喚醒
+- **修復**：喚醒方式改為按**實際容器狀態**選擇（崩潰退出用 `start`、暫停用 `unpause`），不再只看配置的 `sleep_mode`
+- **加固**：iptables DROP 規則操作改為**冪等**——插入前用 `iptables -C` 查重、移除時循環刪除直至不存在，杜絕多路徑接管導致的規則殘留（殘留會導致容器啟動後端口仍被攔截）
+- **前端**：登入/已登入時從伺服器端同步主題，避免瀏覽器 localStorage 舊主題蓋過伺服器端配置；亮色主題改為高對比度配色
+
 ### v1.5.0（2026-08-15）
 - **修復**：Pause 模式容器無法被網路訪問喚醒的問題（Pause 模式同樣寫入 iptables DROP 規則，使客戶端 SYN 封包觸發命中計數後自動喚醒，與 Stop 模式機制一致）
 - **修復**：喚醒（unpause）後殘留的 iptables DROP 規則自動移除
@@ -737,6 +749,12 @@ Each container can be independently configured with a different sleep mode.
 - **Batch Delete**: Select multiple containers via checkboxes, one-click delete
 
 ## 📜 Changelog
+
+### v1.5.1 (2026-08-15)
+- **Fix**: A monitored container that **crashes on its own** (exits while DPM is idle-stopped/paused) could not be woken by network access. Previously only containers actively stopped by DPM had iptables DROP wake-up rules; a self-crashed container had none, so access just got connection refused. DPM now reclaims such `exited` / non-DPM `paused` containers and installs the DROP rules, so network access wakes them
+- **Fix**: Wake-up now picks the action by the container's **actual state** (`start` for crashed/exited, `unpause` for paused) instead of only the configured `sleep_mode`
+- **Hardening**: iptables DROP rule operations are now **idempotent** — check with `iptables -C` before insert, loop-delete until gone on removal — preventing rule leftovers from multi-path reclaim (a leftover would keep the port blocked after the container starts)
+- **Frontend**: theme is now synced from the server on login / when already authenticated, so a stale browser localStorage theme no longer overrides server config; light theme uses a higher-contrast palette
 
 ### v1.5.0 (2026-08-15)
 - **Fix**: Pause mode containers could not be woken up by network access (pause mode now also writes iptables DROP rules, so client SYNs trigger hit counts and auto-wake, consistent with Stop mode)

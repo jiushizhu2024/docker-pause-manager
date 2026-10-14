@@ -1,2 +1,3 @@
 FROM ghcr.io/jiushizhu2024/docker-pause-manager:latest
 COPY app.py /app/app.py
+COPY templates/index.html /app/templates/index.html

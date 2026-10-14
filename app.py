@@ -31,11 +31,12 @@ def _docker_api_stream(method, path, **kwargs):
 # ===== Docker 容器操作封装 =====
 
 class DockerContainer:
-    def __init__(self, container_id, name, status):
+    def __init__(self, container_id, name, status, exit_code=None):
         self.id = container_id
         self.short_id = container_id[:12]
         self.name = name
         self.status = status
+        self.exit_code = exit_code
         self._attrs = {}
 
     def pause(self):
@@ -103,8 +104,21 @@ def get_container_ports(container_name):
         log.error(f"获取容器端口失败 {container_name}: {e}")
         return []
 
+def _iptables_rule_exists(port):
+    """检查 INPUT 链是否已存在针对该端口的 DROP 规则（幂等检查）"""
+    try:
+        r = subprocess.run(
+            ["iptables", "-C", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "DROP"],
+            capture_output=True, timeout=5
+        )
+        return r.returncode == 0
+    except Exception:
+        # iptables -C 不可用时（老内核等）保守返回 False，避免漏插
+        return False
+
 def _add_iptables_drop_rules(container_name):
-    """为容器每个 TCP 端口添加 iptables DROP 规则，拦截 SYN 使客户端重传并触发计数"""
+    """为容器每个 TCP 端口添加 iptables DROP 规则，拦截 SYN 使客户端重传并触发计数。
+    幂等：插入前先用 iptables -C 查重，避免重复插入导致唤醒时残留规则。"""
     try:
         ports = get_container_ports(container_name)
         for port_info in ports:
@@ -112,6 +126,9 @@ def _add_iptables_drop_rules(container_name):
             proto = port_info.get("proto", "tcp")
             if proto == "tcp" and port:
                 try:
+                    if _iptables_rule_exists(port):
+                        log.debug(f"[{container_name}] iptables DROP 规则已存在，跳过 (port {port}/tcp)")
+                        continue
                     subprocess.run(
                         ["iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(port),
                          "-j", "DROP"],
@@ -124,7 +141,7 @@ def _add_iptables_drop_rules(container_name):
         log.error(f"[{container_name}] 获取端口失败: {e}")
 
 def _remove_iptables_drop_rules(container_name):
-    """移除容器所有 TCP 端口的 iptables DROP 规则，并清除计数跟踪"""
+    """移除容器所有 TCP 端口的 iptables DROP 规则（循环删除直到不存在，清掉历史重复），并清除计数跟踪"""
     global _iptables_drop_counts
     try:
         ports = get_container_ports(container_name)
@@ -133,12 +150,17 @@ def _remove_iptables_drop_rules(container_name):
             proto = port_info.get("proto", "tcp")
             if proto == "tcp" and port:
                 try:
-                    subprocess.run(
-                        ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                         "-j", "DROP"],
-                        capture_output=True, timeout=5
-                    )
-                    log.info(f"[{container_name}] iptables DROP 规则已移除 (port {port}/tcp)")
+                    # 循环删除，清掉可能存在的历史重复规则，保证端口彻底开放
+                    removed = 0
+                    while _iptables_rule_exists(port):
+                        subprocess.run(
+                            ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
+                             "-j", "DROP"],
+                            capture_output=True, timeout=5
+                        )
+                        removed += 1
+                    if removed:
+                        log.info(f"[{container_name}] iptables DROP 规则已移除 (port {port}/tcp, 共{removed}条)")
                     _iptables_drop_counts.pop(f"{container_name}:{port}", None)
                 except Exception:
                     pass
@@ -179,24 +201,10 @@ def stop_container(container_name):
     if not container or container.status != "running":
         return False
     try:
-        # 先获取容器端口列表
-        ports = get_container_ports(container_name)
         # 停止容器
         _docker_api("POST", f"/containers/{container.id}/stop")
-        # 为每个 TCP 端口添加 iptables DROP 规则
-        for port_info in ports:
-            port = port_info.get("port", 0)
-            proto = port_info.get("proto", "tcp")
-            if proto == "tcp" and port:
-                try:
-                    subprocess.run(
-                        ["iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(port),
-                         "-j", "DROP"],
-                        capture_output=True, timeout=5
-                    )
-                    log.info(f"[{container_name}] iptables DROP 规则已添加 (port {port}/tcp)")
-                except Exception as e:
-                    log.warning(f"[{container_name}] iptables 规则添加失败 (port {port}): {e}")
+        # 为每个 TCP 端口添加 iptables DROP 规则（幂等）
+        _add_iptables_drop_rules(container_name)
         log.info(f"[{container_name}] 已停止 (stop)")
         return True
     except Exception as e:
@@ -205,7 +213,6 @@ def stop_container(container_name):
 
 def start_container(container_name):
     """启动容器并移除 iptables DROP 规则"""
-    global _iptables_drop_counts
     container = get_container(container_name)
     if not container:
         return False
@@ -213,23 +220,8 @@ def start_container(container_name):
         if container.status == "exited":
             _docker_api("POST", f"/containers/{container.id}/start")
             log.info(f"[{container_name}] 已启动 (start)")
-        # 移除 iptables DROP 规则（无论容器当前状态如何）
-        ports = get_container_ports(container_name)
-        for port_info in ports:
-            port = port_info.get("port", 0)
-            proto = port_info.get("proto", "tcp")
-            if proto == "tcp" and port:
-                try:
-                    subprocess.run(
-                        ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", str(port),
-                         "-j", "DROP"],
-                        capture_output=True, timeout=5
-                    )
-                    log.info(f"[{container_name}] iptables DROP 规则已移除 (port {port}/tcp)")
-                    # 清除该端口的计数跟踪
-                    _iptables_drop_counts.pop(f"{container_name}:{port}", None)
-                except Exception:
-                    pass
+        # 移除 iptables DROP 规则（幂等，清掉历史重复，保证端口彻底开放）
+        _remove_iptables_drop_rules(container_name)
         return True
     except Exception as e:
         log.error(f"[{container_name}] 启动失败: {e}")
@@ -241,7 +233,8 @@ def get_container(container_name):
         return DockerContainer(
             data["Id"],
             data["Name"].lstrip("/"),
-            data["State"]["Status"]
+            data["State"]["Status"],
+            data["State"].get("ExitCode")
         )
     except Exception:
         return None
@@ -1142,20 +1135,31 @@ class ContainerMonitor:
                 if not container:
                     continue
 
-                # --- exited 状态处理（stop 模式或重启后恢复） ---
+                # --- exited 状态处理（stop 模式、重启恢复、或容器自行崩溃退出） ---
                 if container.status == "exited":
-                    if state["is_paused_by_us"]:
-                        # 管理器停掉的容器，检测到流量后启动
-                        if has_new_connection(name, ports):
-                            log.info(f"[{name}] 检测到流量，正在启动 (stop mode)")
-                            start_container(name)
-                            state["idle_seconds"] = 0
-                            state["is_paused_by_us"] = False
-                            needs_save = True
+                    # 若容器非由 DPM 停掉（自行崩溃 / 外部手动 stop）：DPM 接管，
+                    # 挂上 iptables DROP 唤醒钩子，保证网络访问也能唤醒。
+                    if not state["is_paused_by_us"]:
+                        log.info(f"[{name}] 容器已退出(exit_code={container.exit_code})，DPM 接管并挂 DROP 唤醒规则")
+                        _add_iptables_drop_rules(name)
+                        state["is_paused_by_us"] = True
+                        state["idle_seconds"] = 0
+                        needs_save = True
+                    # DPM 托管休眠的容器：检测到流量后启动
+                    if has_new_connection(name, ports):
+                        log.info(f"[{name}] 检测到流量，正在启动 (stop mode)")
+                        start_container(name)
+                        state["idle_seconds"] = 0
+                        state["is_paused_by_us"] = False
+                        needs_save = True
                     continue
 
                 # --- paused 状态处理 ---
                 if container.status == "paused" and not state["is_paused_by_us"]:
+                    # 非 DPM 暂停的容器（外部 docker pause）：接管并挂 DROP 唤醒钩子，
+                    # 否则后续无法通过网络访问唤醒。
+                    log.info(f"[{name}] 容器已暂停(非DPM)，DPM 接管并挂 DROP 唤醒规则")
+                    _add_iptables_drop_rules(name)
                     state["is_paused_by_us"] = True
                     state["idle_seconds"] = 0
                     needs_save = True
@@ -1227,12 +1231,18 @@ def event_handler_loop():
                     matching_ports = [p for p in state["ports"] if int(p.get("port", 0)) == port]
                     if matching_ports and state["is_paused_by_us"]:
                         log.info(f"[事件驱动] [{name}] 立即唤醒 (port={port})")
-                        # 根据睡眠模式选择唤醒方式
-                        sleep_mode = state.get("sleep_mode", "pause")
-                        if sleep_mode == "stop":
+                        # 按实际容器状态选择唤醒方式（崩溃退出的容器需 start 而非 unpause）
+                        c = get_container(name)
+                        if c and c.status == "exited":
                             start_container(name)
-                        else:
+                        elif c and c.status == "paused":
                             unpause_container(name)
+                        else:
+                            # 状态未知时按 sleep_mode 兜底
+                            if state.get("sleep_mode", "pause") == "stop":
+                                start_container(name)
+                            else:
+                                unpause_container(name)
                         state["idle_seconds"] = 0
                         state["is_paused_by_us"] = False
                         # 保存状态
@@ -1247,15 +1257,14 @@ def event_handler_loop():
                 if state.get("is_paused_by_us", False):
                     container = get_container(name)
                     if container:
-                        sleep_mode = state.get("sleep_mode", "pause")
-                        if container.status == "exited" and sleep_mode == "stop" \
+                        if container.status == "exited" \
                                 and has_new_connection(name, state.get("ports", [])):
                             log.info(f"[iptables 轮询] [{name}] 检测到流量，启动容器")
                             start_container(name)
                             state["idle_seconds"] = 0
                             state["is_paused_by_us"] = False
                             monitor._save_state()
-                        elif container.status == "paused" and sleep_mode == "pause" \
+                        elif container.status == "paused" \
                                 and has_new_connection(name, state.get("ports", [])):
                             log.info(f"[iptables 轮询] [{name}] 检测到流量，唤醒容器")
                             unpause_container(name)

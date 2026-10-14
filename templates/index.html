@@ -19,12 +19,12 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
-            --bg: #ffffff; --bg-card: #f8f9fa; --text: #000000;
-            --text-muted: #495057; --border: #dee2e6; --primary: #0056b3;
-            --primary-hover: #004494; --success: #28a745; --success-bg: #d4edda;
-            --warning: #ffc107; --warning-bg: #fff3cd; --danger: #dc3545;
-            --danger-bg: #f8d7da; --info: #17a2b8; --info-bg: #d1ecf1;
-            --shadow: 0 2px 4px rgba(0,0,0,0.1);
+            --bg: #f1f5f9; --bg-card: #ffffff; --text: #0f172a;
+            --text-muted: #334155; --border: #cbd5e1; --primary: #1d4ed8;
+            --primary-hover: #1e40af; --success: #15803d; --success-bg: #dcfce7;
+            --warning: #92400e; --warning-bg: #fef3c7; --danger: #b91c1c;
+            --danger-bg: #fee2e2; --info: #0e7490; --info-bg: #cffafe;
+            --shadow: 0 2px 6px rgba(15, 23, 42, 0.12);
         }
         [data-theme="dark"] {
             --bg: #0a0a0a; --bg-card: #1a1a1a; --text: #ffffff;
@@ -391,7 +391,7 @@
                 const d = await fetch('/api/login', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ password: pw }) }).then(r => r.json());
                 if (d.token) {
                     token = d.token; localStorage.setItem('dpm_token', token);
-                    closeLoginModal(); fetchStatus();
+                    closeLoginModal(); syncServerTheme(); fetchStatus();
                 } else { alert(d.error || i18nData['login_failed'] || '登录失败'); }
             } catch(e) { alert(i18nData['login_error'] || '登录错误'); }
         }
@@ -403,6 +403,17 @@
             document.querySelectorAll('[data-i18n]').forEach(el => { const key = el.getAttribute('data-i18n'); if (i18nData[key]) el.textContent = i18nData[key]; });
         }
         function applyTheme() { document.documentElement.setAttribute('data-theme', currentTheme); localStorage.setItem('dpm_theme', currentTheme); }
+
+        // 页面加载/登录后从服务端同步主题，避免浏览器 localStorage 缓存的旧主题盖过服务端配置
+        let serverThemeLoaded = false;
+        async function syncServerTheme() {
+            if (!token || serverThemeLoaded) return;
+            try {
+                const s = await api('/api/settings');
+                if (s && s.theme) { currentTheme = s.theme; applyTheme(); }
+                serverThemeLoaded = true;
+            } catch(e) { /* 保持本地主题 */ }
+        }
 
         async function fetchStatus() {
             try {
