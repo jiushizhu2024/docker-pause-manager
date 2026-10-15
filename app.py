@@ -290,7 +290,7 @@ DEFAULT_CONFIG = {
 
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "IP#19e362")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "5287"))
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 JWT_SECRET = secrets.token_hex(32)
 JWT_ALGORITHM = "HS256"
 JWT_EXP_HOURS = 24
