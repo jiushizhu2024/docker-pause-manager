@@ -239,6 +239,22 @@ def get_container(container_name):
     except Exception:
         return None
 
+def get_container_bridge(container_name):
+    """获取容器所属的宿主机网桥接口名（br-<NetworkID前12位>）。
+    每个 Docker compose 网络对应一个独立 br- 网桥，容器流量只经过其所属网桥。
+    返回 None 表示无法确定（容器未运行、host 网络等），调用方应跳过该容器的网桥监听。
+    """
+    try:
+        data = _docker_api("GET", f"/containers/{container_name}/json")
+        networks = data.get("NetworkSettings", {}).get("Networks", {}) or {}
+        for _net_name, net_info in networks.items():
+            nid = net_info.get("NetworkID", "")
+            if nid:
+                return f"br-{nid[:12]}"
+    except Exception:
+        pass
+    return None
+
 def get_container_state(container_name):
     container = get_container(container_name)
     if not container:
@@ -363,17 +379,27 @@ class PacketCounter:
     def __init__(self, interface, ports):
         self.interface = interface
         self.ports = set(ports)
+        # br_iface -> set(container_names)：该网桥上被监控的容器
+        self.container_bridges = {}
         self.packet_counts = {}
         self.lock = threading.Lock()
         self.running = False
         self.thread = None
         self.sock = None
         self.interfaces = []
-    
+
+    def set_container_bridges(self, container_bridges):
+        """设置 网桥接口 -> 容器名 的映射，仅监听被监控容器所属的网桥。
+        每个网桥通常只承载一个容器，流量天然隔离，避免同端口其它容器的流量误判。"""
+        self.container_bridges = container_bridges
+        # 收集需要监听的网桥接口
+        self.interfaces = list(dict.fromkeys(container_bridges.keys()))
+
     def start(self):
         if self.running:
             return
-        self.interfaces = self._discover_interfaces()
+        if not self.interfaces:
+            self.interfaces = self._discover_interfaces()
         log.info(f"[AF_PACKET] 接口列表: {self.interfaces}")
         
         self.running = True
@@ -385,8 +411,9 @@ class PacketCounter:
             log.info(f"[AF_PACKET] 启动包嗅探，监听 {self.interfaces}，端口 {sorted(self.ports)}")
         else:
             log.error("[AF_PACKET] 启动失败")
-    
+
     def _discover_interfaces(self):
+        # 兜底：若未通过 set_container_bridges 设置，回退到监听所有 br- 网桥 + 主接口
         interfaces = []
         try:
             interfaces.append(self.interface)
@@ -434,7 +461,7 @@ class PacketCounter:
                 while self.running:
                     try:
                         data = sock.recv(2048)
-                        self._parse_packet(data)
+                        self._parse_packet(data, iface)
                     except socketlib.timeout:
                         continue
                     except Exception as e:
@@ -458,7 +485,7 @@ class PacketCounter:
         while self.running:
             time.sleep(1)
     
-    def _parse_packet(self, data):
+    def _parse_packet(self, data, iface=None):
         if len(data) < 34:
             return
         eth_type = struct.unpack('!H', data[12:14])[0]
@@ -476,23 +503,30 @@ class PacketCounter:
                 return
             src_port = struct.unpack('!H', ip_header[20:22])[0]
             dst_port = struct.unpack('!H', ip_header[22:24])[0]
-            self._count_port(src_port)
-            self._count_port(dst_port)
+            self._count_port(src_port, iface)
+            self._count_port(dst_port, iface)
         
         elif proto == self.PROTO_UDP:
             if len(ip_header) < 28:
                 return
             src_port = struct.unpack('!H', ip_header[20:22])[0]
             dst_port = struct.unpack('!H', ip_header[22:24])[0]
-            self._count_port(src_port)
-            self._count_port(dst_port)
+            self._count_port(src_port, iface)
+            self._count_port(dst_port, iface)
     
-    def _count_port(self, port):
-        if port in self.ports:
-            with self.lock:
-                self.packet_counts[port] = self.packet_counts.get(port, 0) + 1
-            # 立即添加到唤醒队列
-            event_queue.add(port, None)  # None 表示任意容器
+    def _count_port(self, port, iface=None):
+        if port not in self.ports:
+            return
+        # 通过监听的网桥接口确定所属容器（每个网桥只承载被监控的容器）
+        containers = self.container_bridges.get(iface, set())
+        with self.lock:
+            self.packet_counts[port] = self.packet_counts.get(port, 0) + 1
+        if containers:
+            for cname in containers:
+                event_queue.add(port, cname)
+        else:
+            # 兜底：未匹配到网桥（如默认网桥回退监听）时按任意容器处理
+            event_queue.add(port, None)
     
     def get_count(self, port):
         with self.lock:
@@ -518,6 +552,19 @@ def init_packet_counter():
         return
     
     packet_counter = PacketCounter(NETWORK_INTERFACE, all_ports)
+    
+    # 构建 网桥接口 -> 被监控容器 的映射，仅监听被监控容器所属的网桥
+    # 每个 compose 网络对应一个独立 br- 网桥，只承载该容器流量，天然隔离，
+    # 避免其它容器（如 headscale 在 docker0）的同端口流量被误判为被监控容器被访问。
+    container_bridges = {}
+    for name in MONITORED_CONTAINERS:
+        br = get_container_bridge(name)
+        if br:
+            container_bridges.setdefault(br, set()).add(name)
+            log.info(f"[AF_PACKET] 容器 {name} -> 监听网桥 {br}")
+        else:
+            log.warning(f"[AF_PACKET] 容器 {name} 无法确定网桥，将依赖 iptables DROP 规则唤醒")
+    packet_counter.set_container_bridges(container_bridges)
     packet_counter.start()
 
 
