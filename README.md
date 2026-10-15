@@ -64,6 +64,7 @@ Stop 后容器端口关闭，客户端会收到 `connection refused`。解决方
 2. **paused 状态下**：容器端口不可达，SYN 被 DROP 规则拦截，客户端持续重传
 3. **检测到流量**：轮询器发现该容器端口的 DROP 规则命中计数增长 → `docker unpause` → 移除 DROP 规则
 4. 唤醒后 1 秒内客户端重传即可连通；事件嗅探队列保留作为辅助路径
+5. **v1.5.2 桥接隔离**：AF_PACKET 嗅探（辅助路径）已收窄到每个被监控容器所属的专用 `br-*` 网桥，不再监听 `docker0` 等共享网桥，避免跨容器端口误唤醒
 
 ## 📋 docker-compose.yml 详解
 
@@ -214,8 +215,11 @@ environment:
 
 ## 📜 更新日志
 
-### v1.5.1（2026-08-15）
-- **修复**：DPM 监控容器在闲置停止/暂停后，**应用自身崩溃退出**时无法被网络访问唤醒的问题（此前仅对 DPM 主动停止的容器挂 iptables DROP 唤醒规则；自行崩溃的容器没有 DROP 规则，访问只会连接被拒）。现 DPM 会接管这类 `exited` / 非 DPM `paused` 容器，自动挂上 DROP 规则，使网络访问即可唤醒
+### v1.5.2（2026-08-15）
+- **新增**：**桥接级接口隔离**——AF_PACKET 原始套接字嗅探不再监听所有 `br-*` 网桥并按端口匹配，而是通过 `get_container_bridge()` 精确绑定到每个被监控容器所属的专用 `br-*` 网桥。彻底消除跨容器误唤醒（例如 headscale 在 `docker0` 上占用 8080 端口，会被误判为 dpanel/searxng 的流量而反复自动唤醒）
+- **部署**：compose 的 `image` 行切回官方镜像 `ghcr.io/jiushizhu2024/docker-pause-manager:latest`
+
+### v1.5.1（2026-08-15）：DPM 监控容器在闲置停止/暂停后，**应用自身崩溃退出**时无法被网络访问唤醒的问题（此前仅对 DPM 主动停止的容器挂 iptables DROP 唤醒规则；自行崩溃的容器没有 DROP 规则，访问只会连接被拒）。现 DPM 会接管这类 `exited` / 非 DPM `paused` 容器，自动挂上 DROP 规则，使网络访问即可唤醒
 - **修复**：唤醒方式改为按**实际容器状态**选择（崩溃退出用 `start`、暂停用 `unpause`），不再只看配置的 `sleep_mode`
 - **加固**：iptables DROP 规则操作改为**幂等**——插入前用 `iptables -C` 查重、移除时循环删除直至不存在，杜绝多路径接管导致的规则残留（残留会导致容器启动后端口仍被拦截）
 - **前端**：登录/已登录时从服务端同步主题，避免浏览器 localStorage 旧主题盖过服务端配置；亮色主题改为高对比度配色
@@ -332,6 +336,7 @@ Stop 後容器埠關閉，客戶端會收到 `connection refused`。解決方案
 2. **paused 狀態下**：容器埠不可達，SYN 被 DROP 規則攔截，客戶端持續重傳
 3. **偵測到流量**：輪詢器發現該容器埠的 DROP 規則命中計數增長 → `docker unpause` → 移除 DROP 規則
 4. 喚醒後 1 秒內客戶端重傳即可連線；事件嗅探佇列保留作為輔助路徑
+5. **v1.5.2 橋接隔離**：AF_PACKET 嗅探（輔助路徑）已收窄到每個受監控容器所屬的專用 `br-*` 網橋，不再監聽 `docker0` 等共用網橋，避免跨容器埠誤喚醒
 
 ## 📋 docker-compose.yml 詳解
 
@@ -482,8 +487,11 @@ environment:
 
 ## 📜 更新日誌
 
-### v1.5.1（2026-08-15）
-- **修復**：DPM 監控容器在閒置停止/暫停後，**應用自身崩潰退出**時無法被網路訪問喚醒的問題（此前僅對 DPM 主動停止的容器掛 iptables DROP 喚醒規則；自行崩潰的容器沒有 DROP 規則，訪問只會連線被拒）。現 DPM 會接管這類 `exited` / 非 DPM `paused` 容器，自動掛上 DROP 規則，使網路訪問即可喚醒
+### v1.5.2（2026-08-15）
+- **新增**：**橋接級介面隔離**——AF_PACKET 原始套接字嗅探不再監聽所有 `br-*` 網橋並按埠比對，而是透過 `get_container_bridge()` 精確綁定到每個受監控容器所屬的專用 `br-*` 網橋。徹底消除跨容器誤喚醒（例如 headscale 在 `docker0` 上佔用 8080 埠，會被誤判為 dpanel/searxng 的流量而反覆自動喚醒）
+- **部署**：compose 的 `image` 行切回官方映像 `ghcr.io/jiushizhu2024/docker-pause-manager:latest`
+
+### v1.5.1（2026-08-15）：DPM 監控容器在閒置停止/暫停後，**應用自身崩潰退出**時無法被網路訪問喚醒的問題（此前僅對 DPM 主動停止的容器掛 iptables DROP 喚醒規則；自行崩潰的容器沒有 DROP 規則，訪問只會連線被拒）。現 DPM 會接管這類 `exited` / 非 DPM `paused` 容器，自動掛上 DROP 規則，使網路訪問即可喚醒
 - **修復**：喚醒方式改為按**實際容器狀態**選擇（崩潰退出用 `start`、暫停用 `unpause`），不再只看配置的 `sleep_mode`
 - **加固**：iptables DROP 規則操作改為**冪等**——插入前用 `iptables -C` 查重、移除時循環刪除直至不存在，杜絕多路徑接管導致的規則殘留（殘留會導致容器啟動後端口仍被攔截）
 - **前端**：登入/已登入時從伺服器端同步主題，避免瀏覽器 localStorage 舊主題蓋過伺服器端配置；亮色主題改為高對比度配色
@@ -600,6 +608,7 @@ Early versions of Pause mode relied solely on AF_PACKET raw-socket sniffing for 
 2. **While paused**: Container ports are unreachable; SYNs are intercepted by the DROP rules and clients keep retransmitting
 3. **Traffic detected**: The poller notices the DROP rule's hit counter increasing for this container's port → `docker unpause` → remove the DROP rules
 4. Clients connect via retransmission within ~1 second of wake-up; the event sniffing queue is kept as an auxiliary path
+5. **v1.5.2 Bridge isolation**: AF_PACKET sniffing (the auxiliary path) is narrowed to each monitored container's dedicated `br-*` bridge network, no longer listening on shared bridges such as `docker0`, avoiding cross-container port false wake-ups
 
 ## 📋 docker-compose.yml Explained
 
@@ -750,8 +759,11 @@ Each container can be independently configured with a different sleep mode.
 
 ## 📜 Changelog
 
-### v1.5.1 (2026-08-15)
-- **Fix**: A monitored container that **crashes on its own** (exits while DPM is idle-stopped/paused) could not be woken by network access. Previously only containers actively stopped by DPM had iptables DROP wake-up rules; a self-crashed container had none, so access just got connection refused. DPM now reclaims such `exited` / non-DPM `paused` containers and installs the DROP rules, so network access wakes them
+### v1.5.2 (2026-08-15)
+- **Add**: **Bridge-level interface isolation** — AF_PACKET raw-socket sniffing no longer listens on every `br-*` bridge and matches by port. It now binds precisely (via `get_container_bridge()`) to the dedicated `br-*` bridge network of each monitored container, eliminating cross-container false wake-ups (e.g. headscale on `docker0` holding port 8080 was misattributed to dpanel/searxng and repeatedly woke them up on its own)
+- **Deploy**: compose `image` line switched back to the official image `ghcr.io/jiushizhu2024/docker-pause-manager:latest`
+
+### v1.5.1 (2026-08-15): A monitored container that **crashes on its own** (exits while DPM is idle-stopped/paused) could not be woken by network access. Previously only containers actively stopped by DPM had iptables DROP wake-up rules; a self-crashed container had none, so access just got connection refused. DPM now reclaims such `exited` / non-DPM `paused` containers and installs the DROP rules, so network access wakes them
 - **Fix**: Wake-up now picks the action by the container's **actual state** (`start` for crashed/exited, `unpause` for paused) instead of only the configured `sleep_mode`
 - **Hardening**: iptables DROP rule operations are now **idempotent** — check with `iptables -C` before insert, loop-delete until gone on removal — preventing rule leftovers from multi-path reclaim (a leftover would keep the port blocked after the container starts)
 - **Frontend**: theme is now synced from the server on login / when already authenticated, so a stale browser localStorage theme no longer overrides server config; light theme uses a higher-contrast palette
